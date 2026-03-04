@@ -76,7 +76,7 @@ This is a structural problem: AI systems generating confident but incorrect stat
 4. **Research Infrastructure**
    - Log schema designed as a first-class research dataset (not just a debug artifact): `session_id`, `call_id`, `tool_name`, `hallucination_hint`, `pd_active`, `latency_ms`, `error` as top-level fields
    - Export sessions as flat CSV or clean JSONL for analysis in Python, R, or MATLAB
-   - `flight log filter --hallucinations` surfaces calls where the client proceeded after a server error — the detectable signature of a hallucinated success
+   - `flight log filter --hallucinations` surfaces calls where the client proceeded after a server error — a detectable *heuristic* for hallucinated success (does not catch fabricated data, wrong-but-successful arguments, or reasoning hallucinations that bypass tool calls entirely)
    - Enables quantitative modeling of tool-calling policies and empirical study of when and how agents hallucinate
 
 ### Success Metrics
@@ -114,7 +114,8 @@ This is a structural problem: AI systems generating confident but incorrect stat
 ### 3. Terminal CLI
 ```bash
 # Setup
-flight init claude                   # Write ready-to-use claude_desktop_config.json snippet
+flight init claude                   # Discover existing MCP servers, wrap with Flight proxy
+flight init claude --apply           # Apply directly (backs up original first)
 
 # Logging
 flight log list                      # List all sessions
@@ -172,34 +173,47 @@ Implements the meta-tool pattern to reduce schema bloat:
 - Emit a simple before/after token estimate per session (raw schema token count vs. disclosed count)
 - **Fallback:** If schema interception fails or the server returns an unexpected format, silently drop back to passthrough mode and log a warning
 
+**`execute_tool` Routing & Protocol Details:**
+
+When Claude calls `execute_tool({ tool_name: "read_file", arguments: { path: "src/auth.ts" } })`, the proxy must:
+1. Look up `read_file` in the cached schema registry
+2. Translate the call into a standard `tools/call` JSON-RPC request with the original tool name and arguments
+3. Map the proxy's `call_id` to the upstream `call_id` for response correlation
+4. Forward the upstream response back to Claude, unwrapping it from `execute_tool` framing — Claude receives the result as if it called the tool directly
+5. If the tool name is not found in the cache, return a JSON-RPC error to Claude (not a proxy crash) with a descriptive message
+
+**Error propagation:** Upstream errors (JSON-RPC error responses, timeouts, crashes) are forwarded to Claude as `execute_tool` error responses with the original error message preserved. The proxy never swallows upstream errors.
+
+**MCP Protocol Negotiation:**
+
+The proxy must handle the MCP `initialize` handshake transparently:
+1. **Passthrough mode (PD disabled):** Forward `initialize` request/response unmodified between client and server. The proxy is invisible at the protocol level.
+2. **PD mode:** Forward the `initialize` handshake unmodified (capabilities are negotiated between client and server directly). The proxy only intercepts `tools/list` responses *after* initialization completes. It does **not** modify advertised capabilities — it only replaces the tool list content.
+3. **Version pinning:** The proxy should log the MCP protocol version from the `initialize` exchange and warn if it encounters an unsupported version (currently targets MCP draft spec as of March 2026).
+
+**PD Validation Checkpoint (required before full implementation):**
+
+Before building the full PD implementation, validate the meta-tool pattern with a manual test:
+1. Create a mock MCP server that exposes only `discover_tools` and `execute_tool`
+2. Run a real Claude Code session against it with a multi-step task
+3. Evaluate: Does Claude correctly discover tools before using them? Does the indirection cause reasoning errors, extra retries, or tool-calling failures?
+4. **Go/no-go:** If Claude's task completion rate drops >20% vs. passthrough, explore alternative designs (e.g., category-based schema subsets, lazy schema loading) before proceeding.
+
 **Deferred to post-v1.0:**
 - Multi-server orchestration (routing `execute_tool` across N upstream servers)
 - Per-tool usage frequency stats and cross-session disclosure analytics
 - Complex fuzzy-matching or embedding-based tool search
 - Schema diff detection across MCP server versions
 
-### 6. Developer-Facing Usage Metrics File
+### 6. Usage Metrics (Computed from Session Logs)
 
-Flight writes a local `~/.flight/metrics.jsonl` file with lightweight, anonymized aggregate data from each session. This file is **never transmitted** and exists solely so the developer (you) can mine local adoption and usage patterns over time.
+`flight metrics summary` computes aggregate usage metrics **on-the-fly from session logs** — no separate metrics file is maintained. This avoids additional disk surface area while providing the same insights.
 
-**Fields logged per session:**
-```json
-{
-  "session_date": "2026-03-15",
-  "install_id": "rand-uuid-set-once",
-  "tool_count": 12,
-  "pd_enabled": true,
-  "total_calls": 47,
-  "error_rate": 0.04,
-  "tokens_saved_estimate": 180000,
-  "session_duration_s": 1420,
-  "proxy_version": "0.9.1"
-}
-```
+**Output includes:** session count, total tool calls, error rate distribution, PD adoption rate, estimated token savings, average session duration.
 
-**Privacy:** No IP addresses, no payload content, no file paths, no tool names — only aggregate counts and flags. The `install_id` is a random UUID generated at first run, containing no PII.
+**Privacy:** All computation is local. No data is transmitted. Metrics are derived from the same `.jsonl` session logs that are already subject to secret redaction.
 
-**Usage:** Run `flight metrics summary` to print a local report of usage trends across all recorded sessions — useful for understanding whether progressive disclosure is actually being adopted and where errors cluster.
+> **Note:** A dedicated `~/.flight/metrics.jsonl` file for pre-computed metrics is deferred to post-v1.0. If on-the-fly computation becomes too slow for users with thousands of sessions, a cache file will be introduced then.
 
 ### 7. Safety & Isolation
 - **Secret redaction** for configured env vars and patterns
@@ -287,8 +301,11 @@ $ npm install -g flight-proxy
 
 # Generate Claude Desktop config snippet
 $ flight init claude
-✓ Config written to: ~/.flight/claude_desktop_config_snippet.json
-  Add this to your claude_desktop_config.json under "mcpServers"
+✓ Found existing config: ~/Library/Application Support/Claude/claude_desktop_config.json
+✓ Discovered 3 MCP servers: filesystem, github, postgres
+✓ Wrapped config written to: ~/.flight/claude_desktop_config_snippet.json
+  Review and merge into your claude_desktop_config.json, or run:
+  flight init claude --apply    # overwrites in place (backup saved to .bak)
 
 # Start a Claude Code session — Flight intercepts automatically
 $ flight log tail
@@ -307,12 +324,14 @@ $ flight log tail
 $ flight log tail
 [14:02:11] ↑ Claude → write_file("auth.ts", ...)
 [14:02:12] ↓ filesystem_mcp → ERROR: Permission denied
-[14:02:14] ⚠  HALLUCINATION: Claude proceeded as if successful
+[14:02:14] ⚠  HALLUCINATION HINT: Claude proceeded after server error
 
-# Replay to confirm
+# Replay to confirm the upstream failure
 $ flight replay call_abc123
 ERROR: Permission denied (path outside allowed directory)
 ```
+
+> **Important:** `hallucination_hint` is a heuristic, not a ground-truth hallucination detector. It flags one detectable pattern: the client proceeding after an upstream error without retrying. It does **not** catch fabricated data in successful responses, wrong tool arguments that happen to succeed, or hallucinated reasoning that never involved a tool call. Treat hints as investigative leads, not verdicts.
 
 ### Workflow 2: Optimize Token Usage
 ```bash
@@ -360,6 +379,7 @@ $ flight log view session_xyz --tui
 | Complex tool schemas break progressive disclosure | Fallback to passthrough mode, add schema validation |
 | Anthropic adds native debugging | Position as enhanced/offline alternative |
 | **Progressive disclosure ships late or incomplete** | **Treat as Phase 3 (Week 3-4) feature, not Phase 4. PD v0 is intentionally narrow (single-server only). Ship without TUI before shipping without PD. If PD slips, delay v1.0 rather than release a pure logger.** |
+| **PD indirection degrades Claude's reasoning quality** | **The `discover_tools` → `execute_tool` pattern adds an extra round-trip per tool call. Claude must reason through the indirection layer, which may reduce tool-calling accuracy. Mitigate with a manual validation test (see PD Validation Checkpoint below) before committing to full implementation. If Claude struggles with the pattern, consider alternative designs (e.g., category-based schema subsets instead of meta-tools).** |
 
 ---
 
@@ -396,10 +416,12 @@ What is explicitly NOT in the MVP:
 
 > **Critical path note:** Progressive disclosure is the primary differentiator vs. Reticle and MCP Inspector. It must ship in v1.0 — not as a stretch goal. PD v0 is intentionally narrow to make this achievable. The timeline below front-loads it accordingly.
 
-- **Week 1-2:** Core proxy + basic logging + `flight init claude`
+- **Week 1-2:** Core proxy + basic logging + `flight init claude` + CI setup
 - **Week 2-3:** Phase 1.5 MVP → ship to 3 friendly users, gather feedback
-- **Week 3-4:** PD v0 (single-server schema caching, `discover_tools`/`execute_tool`, session token estimate)
-- **Week 5-6:** CLI commands + replay functionality + TUI
+- **Week 3:** PD validation checkpoint (manual mock test with real Claude sessions — go/no-go gate)
+- **Week 3-4:** PD v0 implementation (single-server schema caching, `discover_tools`/`execute_tool`, session token estimate)
+- **Week 5:** CLI commands (log list/view/filter/inspect, export)
+- **Week 6:** Replay functionality + TUI
 - **Week 7-8:** Hardening, docs, v1.0 release
 
 ---
@@ -409,7 +431,7 @@ What is explicitly NOT in the MVP:
 1. Should we support HTTP transport in addition to stdio?
 2. Do we need built-in anonymization for sharing logs publicly?
 3. Should progressive disclosure be opt-in or default?
-4. Should the developer-facing `metrics.jsonl` file be opt-out by default, or require explicit opt-in (`flight metrics enable`)? Opt-out is lower friction; opt-in is more respectful of user expectations.
+4. ~~Should the developer-facing `metrics.jsonl` file be opt-out or opt-in?~~ **Resolved:** No separate metrics file in v1.0. `flight metrics summary` computes on-the-fly from session logs.
 5. ~~What's the right balance between log detail and disk usage?~~ **Resolved:** Default 100 sessions / 2GB compressed / 5GB total cap; gzip sessions older than 1 day. See Flight Recorder spec.
 
 ---

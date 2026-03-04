@@ -1,10 +1,31 @@
-# ✈️ Flight Proxy
+# Flight Proxy
 
-**A local MCP flight recorder, token optimizer, and research instrument for AI coding agents.**
+**A local MCP flight recorder and research instrument for AI coding agents.**
 
-`flight-proxy` sits transparently between Claude Code (or any MCP client) and your upstream MCP servers. It logs every tool call, response, error, and loop — then lets you replay, inspect, and analyze them. It also implements progressive disclosure to cut schema token overhead by up to 50×.
+```
+┌─────────────────┐
+│  Claude Code     │
+│  (MCP Client)    │
+└────────┬─────────┘
+         │ stdio
+         ▼
+┌─────────────────┐
+│  Flight Proxy    │  ◄── Logs to .jsonl
+│  - Intercept     │  ◄── Hallucination hints
+│  - Record        │  ◄── Secret redaction
+└────────┬─────────┘
+         │ stdio
+         ▼
+┌─────────────────┐
+│  MCP Server      │
+│  (filesystem,    │
+│   postgres, etc) │
+└──────────────────┘
+```
 
-And it is research infrastructure: every captured session is a structured, analyzable dataset for studying when and how AI agents hallucinate, misuse tools, and recover from failures.
+`flight-proxy` sits transparently between Claude Code (or any MCP client) and your upstream MCP servers. It logs every tool call, response, and error — then lets you inspect and analyze them from the terminal.
+
+It is also research infrastructure: every captured session is a structured, analyzable dataset for studying when and how AI agents hallucinate, misuse tools, and recover from failures.
 
 ---
 
@@ -14,19 +35,7 @@ During the **MathWorks M3 competition**, I leaned on AI assistants for brainstor
 
 That frustration directly led to `flight-proxy`.
 
-The M3 experience exposed a structural problem: AI systems producing confident but incorrect statements, with no ground-truth trace. Without a record of every tool call, response, and error, hallucinations can't be studied — they can only be discovered after the damage is done. `flight-proxy` is my attempt to build the missing instrumentation layer. It turns opaque agent runs into **structured, replayable, analyzable records** — the raw material for empirically studying agent behavior instead of treating failures as mysterious.
-
----
-
-## What It Is
-
-Two things in one:
-
-**1. A developer debugging tool**
-Drop-in STDIO proxy that records every JSON-RPC message between Claude Code and your MCP servers. When Claude claims it created a file that doesn't exist, you can see exactly what the model sent, what the server returned, and where the hallucination occurred.
-
-**2. Research infrastructure**
-Every session becomes a structured dataset with fields like `tool_name`, `hallucination_hint`, `latency_ms`, `error`, and `pd_active`. You can export sessions to CSV, filter for hallucination-hint events, and model tool-calling policies quantitatively — moving from anecdotal AI failures to empirical analysis.
+The M3 experience exposed a structural problem: AI systems producing confident but incorrect statements, with no ground-truth trace. Without a record of every tool call, response, and error, hallucinations can't be studied — they can only be discovered after the damage is done. `flight-proxy` is my attempt to build the missing instrumentation layer. It turns opaque agent runs into **structured, analyzable records** — the raw material for empirically studying agent behavior instead of treating failures as mysterious.
 
 ---
 
@@ -36,65 +45,57 @@ Every session becomes a structured dataset with fields like `tool_name`, `halluc
 # Install
 npm install -g flight-proxy
 
-# Generate a ready-to-use Claude Desktop config snippet
+# Discover your existing MCP servers and wrap them with Flight
 flight init claude
+# → reads your claude_desktop_config.json
+# → wraps each server with the Flight proxy
 # → writes snippet to ~/.flight/claude_desktop_config_snippet.json
-# → add it to your claude_desktop_config.json under "mcpServers"
+
+# Or apply directly (backs up your original config)
+flight init claude --apply
 
 # Start a Claude Code session — Flight intercepts automatically
+# Then inspect what happened:
 flight log tail
 ```
 
 ```
-● Recording MCP traffic to ~/.flight/logs/session_20260315_142201.jsonl
-  flight log view session_20260315_142201   ← inspect after session
-  flight replay <call-id>                   ← replay any call
+● Tailing session_20260315_142201 — ~/.flight/logs/session_20260315_142201.jsonl
 
-[14:22:03] ↑ Claude → filesystem/read_file("src/auth.ts")
-[14:22:03] ↓ filesystem → OK (2,341 bytes, 1ms)
-[14:22:05] ↑ Claude → github/create_pr(...)
-[14:22:06] ↓ github → ERROR: base branch not found
-[14:22:08] ⚠  HALLUCINATION HINT: Claude proceeded as if PR was created
+[14:22:03] ↑ tools/call/read_file (5ms)
+[14:22:05] ↑ tools/call/write_file ERROR: Permission denied
+[14:22:08] ↑ tools/call/read_file ⚠ HALLUCINATION HINT
 ```
 
 ---
 
-## Core Workflows
+## Debug a Hallucinated File Write
 
-### Debug a Hallucinated File Write
+Claude claims it created `auth.ts`, but the file doesn't exist:
+
 ```bash
 $ flight log tail
-[14:02:11] ↑ Claude → write_file("auth.ts", ...)
-[14:02:12] ↓ filesystem_mcp → ERROR: Permission denied
-[14:02:14] ⚠  HALLUCINATION HINT: Claude proceeded as if successful
+[14:02:11] ↑ tools/call/write_file
+[14:02:12] ↓ tools/call ERROR: Permission denied
+[14:02:14] ↑ tools/call/read_file ⚠ HALLUCINATION HINT
 
-$ flight replay call_abc123
-ERROR: Permission denied (path outside allowed directory)
+$ flight log inspect <call-id>
+Session:   session_20260315_140200
+Call ID:   2
+Direction: server->client
+Method:    response
+Latency:   12ms
+Error:     Permission denied
+
+--- Payload ---
+{
+  "jsonrpc": "2.0",
+  "id": 2,
+  "error": { "code": -32000, "message": "Permission denied" }
+}
 ```
 
-### Cut Token Costs with Progressive Disclosure
-```bash
-# 50 tools loaded without PD = ~22,000 tokens per request
-$ flight start --progressive-disclosure
-
-✓ Progressive disclosure: ENABLED (PD v0 — single server)
-✓ Estimated schema tokens: ~500 (was ~22,000)
-
-$ flight stats
-Session duration: 45min | Tool calls: 28
-Tokens saved: ~600,000 (95% reduction) | Cost saved: ~$1.20
-```
-
-### Catch an Infinite Agent Loop
-```bash
-$ flight log view session_xyz
-[1] ↑ query_database → 5,000 rows returned
-[2] ↑ summarize     → model truncated JSON mid-response
-[3] ↑ write_code    → wrong schema used, bug introduced
-[4] ↑ run_tests     → failed
-[5] ↑ query_database → same 5,000 rows again
-⚠  Loop detected at call [6]: identical method + args as [1]
-```
+> **Note:** `hallucination_hint` is a heuristic — it flags when the client proceeds after a server error without retrying. It does not catch fabricated data in successful responses, wrong-but-successful arguments, or reasoning hallucinations that bypass tools entirely. Treat hints as investigative leads, not verdicts.
 
 ---
 
@@ -102,37 +103,32 @@ $ flight log view session_xyz
 
 ```bash
 # Setup
-flight init claude               # Generate claude_desktop_config.json snippet
+flight init claude                  # Discover and wrap existing MCP servers
+flight init claude --apply          # Apply directly (backs up original)
 
-# Logging
-flight log list                  # List all sessions (ID, date, calls, errors, PD flag)
-flight log tail                  # Live stream current session
-flight log view <session>        # Paginated post-mortem timeline
-flight log filter --tool <name>  # Filter by tool name
-flight log filter --errors       # Show only failed calls
-flight log filter --hallucinations  # Show calls with hallucination_hint: true
-flight log gc                    # Garbage collect logs, show reclaimed space
-flight log prune                 # Trim to retention policy
+# Proxy
+flight proxy --cmd <server> -- <args>  # Run proxy manually
 
-# Replay & analysis
-flight replay <call-id>          # Re-execute a specific call
-flight replay <call-id> --dry-run
-flight stats                     # Session token + call summary
-flight export <session> --format csv    # Export for Python/R/MATLAB analysis
-flight export <session> --format jsonl  # Export clean JSONL
-flight metrics summary           # Aggregate usage report across all sessions
+# Log inspection
+flight log list                     # List all sessions (ID, date, calls, errors)
+flight log tail [--session <id>]    # Live stream a session
+flight log view <session>           # Full timeline with summary
+flight log filter --tool <name>     # Filter by tool name
+flight log filter --errors          # Show only failed calls
+flight log filter --hallucinations  # Show hallucination hints
+flight log inspect <call-id>        # Pretty-print full request/response payload
 ```
 
 ---
 
 ## Research Use
 
-Flight Proxy is designed as an instrumentation layer for empirical AI research. Each `.jsonl` session file is a structured dataset:
+Every `.jsonl` session file is a structured dataset:
 
 ```json
 {
-  "session_id": "ses_abc123",
-  "call_id": "call_7f2a",
+  "session_id": "session_20260315_142201",
+  "call_id": "2",
   "timestamp": "2026-03-15T14:02:11.421Z",
   "direction": "server->client",
   "method": "tools/call",
@@ -140,94 +136,82 @@ Flight Proxy is designed as an instrumentation layer for empirical AI research. 
   "latency_ms": 12,
   "error": "Permission denied",
   "hallucination_hint": true,
-  "pd_active": false,
-  "schema_tokens_saved": 0
+  "pd_active": false
 }
 ```
 
 **What you can study:**
 
-- **Hallucination rate by tool** — which tools produce the most hallucinated successes after server errors?
-- **Tool-calling policy modeling** — how does the agent sequence tool calls? What predicts a loop?
-- **Progressive disclosure effects** — does reducing schema token overhead change tool selection behavior?
-- **Latency and error correlation** — do high-latency calls predict downstream hallucinations?
+- **Hallucination rate by tool** — which tools produce the most proceed-after-error patterns?
+- **Tool-calling policy modeling** — how does the agent sequence tool calls?
+- **Latency and error correlation** — do high-latency calls predict downstream failures?
 
-**Example: extract all hallucination hints from a session**
+**Extract all hallucination hints:**
 ```bash
-jq 'select(.hallucination_hint == true)' ~/.flight/logs/session_abc.jsonl
+jq 'select(.hallucination_hint == true)' ~/.flight/logs/session_*.jsonl
 ```
 
-**Example: export for pandas**
-```bash
-flight export session_abc --format csv > session_abc.csv
-python3 -c "
-import pandas as pd
-df = pd.read_csv('session_abc.csv')
-print(df.groupby('tool_name')['hallucination_hint'].mean().sort_values(ascending=False))
-"
-```
+**Analyze with Python:**
+```python
+import json, pathlib
 
-**Example: session-level aggregate across all sessions**
-```bash
-flight metrics summary
-# → tool call counts, error rates, PD adoption %, token savings distribution
+entries = []
+for line in pathlib.Path("~/.flight/logs/session_abc.jsonl").expanduser().read_text().splitlines():
+    entries.append(json.loads(line))
+
+errors = [e for e in entries if e.get("error")]
+hints = [e for e in entries if e.get("hallucination_hint")]
+print(f"Calls: {len(entries)}, Errors: {len(errors)}, Hallucination hints: {len(hints)}")
 ```
 
 ---
 
 ## Features
 
-| Feature | v0.1 MVP | v1.0 |
-|---------|----------|------|
+| Feature | v0.1 (current) | v1.0 (planned) |
+|---------|:--------------:|:--------------:|
 | Transparent STDIO proxy | ✅ | ✅ |
-| `.jsonl` session logging (research-grade schema) | ✅ | ✅ |
-| `flight log tail` / `flight log view` | ✅ | ✅ |
-| `flight init claude` | ✅ | ✅ |
-| Secret redaction (on by default) | ✅ | ✅ |
-| CLI (filter, inspect, gc, prune) | — | ✅ |
+| `.jsonl` session logging | ✅ | ✅ |
+| Hallucination hint detection | ✅ | ✅ |
+| `flight init claude` (config discovery) | ✅ | ✅ |
+| Secret redaction | ✅ | ✅ |
+| `flight log` CLI (list, tail, view, filter, inspect) | ✅ | ✅ |
+| Progressive disclosure (token optimization) | — | ✅ |
 | Replay functionality | — | ✅ |
-| CSV/JSONL export for research | — | ✅ |
-| Progressive disclosure (single-server PD v0) | — | ✅ |
+| CSV/JSONL export | — | ✅ |
 | Token savings metrics | — | ✅ |
-| Terminal UI (TUI) | — | ✅ |
-| Log compression + lifecycle management | — | ✅ |
-| `flight metrics summary` | — | ✅ |
-
----
-
-## Log Storage
-
-Defaults (all configurable):
-- **Retention:** last 100 sessions or last 2GB compressed, whichever comes first
-- **Compression:** sessions older than 1 day are gzip-compressed (~10× ratio)
-- **Total cap:** 5GB. Flight warns in TUI at 80%, auto-prunes at cap.
-- **Location:** `~/.flight/logs/<session_id>.jsonl` → `.jsonl.gz` after 1 day
-
-```bash
-flight log gc          # clean up now, show reclaimed space
-flight log prune --max-sessions 50 --max-disk-mb 1000
-```
+| TUI dashboard | — | ✅ |
+| Log compression + lifecycle | — | ✅ |
 
 ---
 
 ## Performance
 
 - **<5ms** added latency per tool call (streaming NDJSON, fire-and-forget log writes)
+- **4,000+ calls/sec** sustained throughput (benchmarked)
 - **Backpressure-aware:** proxy never accumulates unbounded in-memory buffers
 - **Disk-safe:** disables logging gracefully if free space drops below 100MB
-- Sustains **1,000+ calls/session** and **10 MB/s** log throughput without proxy lag
+- **Write queue:** 1,000 entries max; drops with warning under disk pressure, never stalls the proxy
+
+---
+
+## Log Storage
+
+- **Location:** `~/.flight/logs/<session_id>.jsonl`
+- **One file per session**, append-only
+- Planned for v1.0: automatic compression, retention policies, `flight log gc`
 
 ---
 
 ## Related Work
 
 | Tool | Terminal | Offline | Open Source | Token Optimization | Research-Grade Logs |
-|------|----------|---------|-------------|-------------------|---------------------|
-| **Flight Proxy** | ✅ | ✅ | ✅ | ✅ (PD v0) | ✅ |
-| Reticle | ✅ | ✅ | ✅ | ❌ | ❌ |
-| MCP Inspector | ❌ (browser) | ✅ | ✅ | ❌ | ❌ |
-| AgentLens | ❌ | ❌ | ❌ | ❌ | ❌ |
-| Langfuse/Moesif | ❌ | ❌ | Partial | ❌ | ❌ |
+|------|:--------:|:-------:|:-----------:|:-----------------:|:-------------------:|
+| **Flight Proxy** | ✅ | ✅ | ✅ | planned | ✅ |
+| Reticle | ✅ | ✅ | ✅ | — | — |
+| MCP Inspector | — (browser) | ✅ | ✅ | — | — |
+| AgentLens | — | — | — | — | — |
+| Langfuse/Moesif | — | — | partial | — | — |
 
 ---
 
@@ -244,10 +228,8 @@ Requires Node.js 20+. No database, no cloud, no external dependencies.
 
 ## Documentation
 
-- [`plan.md`](./plan.md) — implementation plan and phase breakdown
 - [`flight-prd.md`](./flight-prd.md) — full product requirements document
-- `ARCHITECTURE.md` — system diagram and JSON-RPC interception details *(coming Week 1)*
-- `RESEARCH.md` — guide to using Flight Proxy as a research instrument *(coming Week 7)*
+- [`plan.md`](./plan.md) — sprint plan and roadmap
 
 ---
 
