@@ -6,6 +6,9 @@
 
 import { createInterface } from "node:readline";
 
+// Track tools that should fail once then succeed (for retry testing)
+const failOnceTracker = new Set<string>();
+
 const TOOLS = [
   { name: "read_file", description: "Read a file", inputSchema: { type: "object", properties: { path: { type: "string" } }, required: ["path"] } },
   { name: "write_file", description: "Write a file", inputSchema: { type: "object", properties: { path: { type: "string" }, content: { type: "string" } }, required: ["path", "content"] } },
@@ -34,7 +37,14 @@ rl.on("line", (line) => {
   } else if (msg.method === "tools/call") {
     const toolName = msg.params?.name;
     if (toolName === "read_file") {
-      respond(msg.id, { content: [{ type: "text", text: "file contents here: " + (msg.params?.arguments?.path ?? "") }] });
+      const path = msg.params?.arguments?.path ?? "";
+      if (path === "/flaky" && !failOnceTracker.has("read_file:/flaky")) {
+        // First call to /flaky fails, second succeeds
+        failOnceTracker.add("read_file:/flaky");
+        respondError(msg.id, -32000, "Temporary read error");
+      } else {
+        respond(msg.id, { content: [{ type: "text", text: "file contents here: " + path }] });
+      }
     } else if (toolName === "write_file") {
       if (msg.params?.arguments?.path === "/forbidden") {
         respondError(msg.id, -32000, "Permission denied");
