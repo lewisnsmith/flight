@@ -2,7 +2,8 @@ import { readdir, readFile, stat } from "node:fs/promises";
 import { join } from "node:path";
 import { homedir } from "node:os";
 import { watch } from "node:fs";
-import type { LogEntry } from "./logger.js";
+import type { LogEntry, AlertEntry } from "./logger.js";
+import { getAlertLogPath } from "./logger.js";
 
 const DEFAULT_LOG_DIR = join(homedir(), ".flight", "logs");
 
@@ -269,4 +270,52 @@ export async function inspectCall(callId: string, sessionId?: string): Promise<v
 
   console.error(`Call not found: ${callId}`);
   process.exit(1);
+}
+
+export async function listAlerts(options: { limit?: number; session?: string } = {}): Promise<void> {
+  const alertPath = getAlertLogPath();
+  let content: string;
+
+  try {
+    content = await readFile(alertPath, "utf-8");
+  } catch {
+    console.log("No alerts found. Alerts are recorded when tool calls fail or hallucination patterns are detected.");
+    return;
+  }
+
+  let alerts = content
+    .trim()
+    .split("\n")
+    .filter(Boolean)
+    .map((line) => JSON.parse(line) as AlertEntry);
+
+  if (options.session) {
+    alerts = alerts.filter((a) => a.session_id.includes(options.session!));
+  }
+
+  const limit = options.limit ?? 50;
+  alerts = alerts.slice(-limit);
+
+  if (alerts.length === 0) {
+    console.log("No alerts found.");
+    return;
+  }
+
+  // Header
+  console.log(
+    `${C.dim}${"Time".padEnd(12)} ${"Severity".padEnd(15)} ${"Tool/Method".padEnd(25)} ${"Message"}${C.reset}`,
+  );
+  console.log(`${C.dim}${"─".repeat(80)}${C.reset}`);
+
+  for (const alert of alerts) {
+    const time = formatTime(alert.timestamp);
+    const sevColor = alert.severity === "hallucination" ? C.yellow : C.red;
+    const sev = `${sevColor}${alert.severity}${C.reset}`;
+    const tool = alert.tool_name ?? alert.method;
+    const msg = alert.message.length > 50 ? alert.message.slice(0, 47) + "..." : alert.message;
+
+    console.log(`${C.dim}${time}${C.reset} ${sev.padEnd(15 + sevColor.length + C.reset.length)} ${tool.padEnd(25)} ${msg}`);
+  }
+
+  console.log(`\n${C.dim}Showing ${alerts.length} alert(s)${C.reset}`);
 }

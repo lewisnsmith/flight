@@ -18,10 +18,21 @@ export interface LogEntry {
   pd_active: boolean;
 }
 
+export interface AlertEntry {
+  timestamp: string;
+  severity: "error" | "hallucination";
+  method: string;
+  tool_name?: string;
+  message: string;
+  session_id: string;
+  call_id: string;
+}
+
 export interface SessionLogger {
   log(msg: JsonRpcMessage, direction: "client->server" | "server->client"): void;
   logError(source: string, message: string): void;
   close(): void;
+  onAlert?: (alert: AlertEntry) => void;
   readonly sessionId: string;
   readonly logPath: string;
 }
@@ -32,9 +43,11 @@ export interface RedactionOptions {
 }
 
 const DEFAULT_LOG_DIR = join(homedir(), ".flight", "logs");
+const DEFAULT_ALERT_PATH = join(homedir(), ".flight", "alerts.jsonl");
 const FLUSH_INTERVAL_MS = 100;
 const MAX_QUEUE_DEPTH = 1000;
 const MIN_DISK_SPACE_BYTES = 100 * 1024 * 1024; // 100MB
+const MAX_LOG_SIZE_BYTES = 50 * 1024 * 1024; // 50MB
 
 interface PendingRequest {
   timestamp: number;
@@ -75,6 +88,15 @@ function escapeRegex(str: string): string {
   return str.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
+function writeAlert(alert: AlertEntry): void {
+  // Fire-and-forget append to alerts.jsonl
+  appendFile(DEFAULT_ALERT_PATH, JSON.stringify(alert) + "\n").catch(() => {});
+}
+
+export function getAlertLogPath(): string {
+  return DEFAULT_ALERT_PATH;
+}
+
 export async function createSessionLogger(logDir?: string, redactionOptions?: RedactionOptions): Promise<SessionLogger> {
   const dir = logDir ?? DEFAULT_LOG_DIR;
   const redact = buildRedactor(redactionOptions);
@@ -109,6 +131,8 @@ export async function createSessionLogger(logDir?: string, redactionOptions?: Re
   const writeQueue: string[] = [];
   let flushTimer: ReturnType<typeof setInterval> | null = null;
   let closed = false;
+  let logSizeBytes = 0;
+  let logSizeCapped = false;
 
   // Track pending requests for latency calculation
   const pendingRequests = new Map<string | number, PendingRequest>();
@@ -136,16 +160,25 @@ export async function createSessionLogger(logDir?: string, redactionOptions?: Re
 
   function enqueue(line: string) {
     if (!loggingEnabled) return;
+    if (logSizeCapped) return;
     if (writeQueue.length >= MAX_QUEUE_DEPTH) {
       process.stderr.write("[flight] Warning: log queue full, dropping entry\n");
+      return;
+    }
+    const lineBytes = Buffer.byteLength(line + "\n");
+    logSizeBytes += lineBytes;
+    if (logSizeBytes > MAX_LOG_SIZE_BYTES) {
+      logSizeCapped = true;
+      process.stderr.write(`[flight] Warning: session log exceeded ${MAX_LOG_SIZE_BYTES / 1024 / 1024}MB cap. Logging disabled for this session.\n`);
       return;
     }
     writeQueue.push(line + "\n");
   }
 
-  return {
+  const logger: SessionLogger = {
     sessionId,
     logPath,
+    onAlert: undefined,
 
     log(msg: JsonRpcMessage, direction: "client->server" | "server->client") {
       const now = Date.now();
@@ -154,10 +187,15 @@ export async function createSessionLogger(logDir?: string, redactionOptions?: Re
       let hallucinationHint: boolean | undefined;
       const toolName = extractToolName(msg);
 
+      let prevErrorToolName: string | undefined;
+      let prevErrorMethod: string | undefined;
+
       if (direction === "client->server") {
         // Hallucination detection: client sent a new request after server returned an error
         // and it's not a retry of the same tool call
         if (lastResponseWasError) {
+          prevErrorToolName = lastErrorToolName;
+          prevErrorMethod = lastErrorMethod;
           const isRetry = msg.method === lastErrorMethod && toolName === lastErrorToolName;
           if (!isRetry) {
             hallucinationHint = true;
@@ -210,6 +248,34 @@ export async function createSessionLogger(logDir?: string, redactionOptions?: Re
       };
 
       enqueue(redact(JSON.stringify(entry)));
+
+      // Emit alerts for errors and hallucination hints
+      if (direction === "server->client" && msg.error) {
+        const alert: AlertEntry = {
+          timestamp: entry.timestamp,
+          severity: "error",
+          method: entry.method,
+          tool_name: entry.tool_name,
+          message: msg.error.message,
+          session_id: sessionId,
+          call_id: callId,
+        };
+        writeAlert(alert);
+        if (logger.onAlert) logger.onAlert(alert);
+      }
+      if (hallucinationHint) {
+        const alert: AlertEntry = {
+          timestamp: entry.timestamp,
+          severity: "hallucination",
+          method: entry.method,
+          tool_name: entry.tool_name,
+          message: `Agent proceeded after error on ${prevErrorToolName ?? prevErrorMethod ?? "unknown"} without retrying`,
+          session_id: sessionId,
+          call_id: callId,
+        };
+        writeAlert(alert);
+        if (logger.onAlert) logger.onAlert(alert);
+      }
     },
 
     logError(source: string, message: string) {
@@ -235,6 +301,8 @@ export async function createSessionLogger(logDir?: string, redactionOptions?: Re
       flush();
     },
   };
+
+  return logger;
 }
 
 function formatTimestamp(date: Date): string {
