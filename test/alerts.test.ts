@@ -32,7 +32,7 @@ describe("Alert System", () => {
       "server->client",
     );
 
-    logger.close();
+    await logger.close();
 
     expect(alerts).toHaveLength(1);
     expect(alerts[0].severity).toBe("error");
@@ -63,7 +63,7 @@ describe("Alert System", () => {
       "client->server",
     );
 
-    logger.close();
+    await logger.close();
 
     const hallucinations = alerts.filter((a) => a.severity === "hallucination");
     expect(hallucinations).toHaveLength(1);
@@ -94,7 +94,7 @@ describe("Alert System", () => {
       "client->server",
     );
 
-    logger.close();
+    await logger.close();
 
     const hallucinations = alerts.filter((a) => a.severity === "hallucination");
     expect(hallucinations).toHaveLength(0);
@@ -119,7 +119,7 @@ describe("Alert System", () => {
       "server->client",
     );
 
-    logger.close();
+    await logger.close();
 
     // Wait for fire-and-forget write
     await new Promise((r) => setTimeout(r, 200));

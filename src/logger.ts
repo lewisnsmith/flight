@@ -1,4 +1,5 @@
-import { writeFile, appendFile, mkdir } from "node:fs/promises";
+import { writeFile, appendFile, mkdir, statfs } from "node:fs/promises";
+import { appendFileSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
 import { randomUUID } from "node:crypto";
@@ -31,7 +32,8 @@ export interface AlertEntry {
 export interface SessionLogger {
   log(msg: JsonRpcMessage, direction: "client->server" | "server->client"): void;
   logError(source: string, message: string): void;
-  close(): void;
+  close(): Promise<void>;
+  closeSync(): void;
   onAlert?: (alert: AlertEntry) => void;
   readonly sessionId: string;
   readonly logPath: string;
@@ -48,6 +50,7 @@ const FLUSH_INTERVAL_MS = 100;
 const MAX_QUEUE_DEPTH = 1000;
 const MIN_DISK_SPACE_BYTES = 100 * 1024 * 1024; // 100MB
 const MAX_LOG_SIZE_BYTES = 50 * 1024 * 1024; // 50MB
+const HALLUCINATION_WINDOW_MS = 30_000; // Only flag hallucination hints within 30s of the error
 
 interface PendingRequest {
   timestamp: number;
@@ -100,27 +103,25 @@ export function getAlertLogPath(): string {
 export async function createSessionLogger(logDir?: string, redactionOptions?: RedactionOptions): Promise<SessionLogger> {
   const dir = logDir ?? DEFAULT_LOG_DIR;
   const redact = buildRedactor(redactionOptions);
-  const sessionId = `session_${formatTimestamp(new Date())}`;
+  const sessionId = `session_${formatTimestamp(new Date())}_${randomUUID().slice(0, 8)}`;
   const logPath = join(dir, `${sessionId}.jsonl`);
 
   await mkdir(dir, { recursive: true });
 
   let loggingEnabled = true;
 
-  // Check disk space via df
+  // Check disk space via fs.statfs (async, cross-platform)
   try {
-    const { execSync } = await import("node:child_process");
-    const output = execSync(`df -k "${dir}" | tail -1`, { encoding: "utf-8" });
-    const parts = output.trim().split(/\s+/);
-    const availableKb = parseInt(parts[3], 10);
-    if (!isNaN(availableKb) && availableKb * 1024 < MIN_DISK_SPACE_BYTES) {
+    const stats = await statfs(dir);
+    const availableBytes = stats.bavail * stats.bsize;
+    if (availableBytes < MIN_DISK_SPACE_BYTES) {
       process.stderr.write(
-        `[flight] Warning: low disk space (${Math.round(availableKb / 1024)}MB available). Logging disabled.\n`,
+        `[flight] Warning: low disk space (${Math.round(availableBytes / 1024 / 1024)}MB available). Logging disabled.\n`,
       );
       loggingEnabled = false;
     }
   } catch {
-    // If df fails (e.g. Windows), proceed with logging enabled
+    // If statfs fails, proceed with logging enabled
   }
 
   // Create the log file
@@ -136,22 +137,33 @@ export async function createSessionLogger(logDir?: string, redactionOptions?: Re
 
   // Track pending requests for latency calculation
   const pendingRequests = new Map<string | number, PendingRequest>();
-  // Track last response error for hallucination detection
-  let lastResponseWasError = false;
-  let lastErrorMethod: string | undefined;
-  let lastErrorToolName: string | undefined;
+  // Track recent server responses for hallucination detection (concurrent-safe)
+  interface RecentResponse {
+    isError: boolean;
+    method?: string;
+    toolName?: string;
+    timestamp: number;
+  }
+  const recentResponses: RecentResponse[] = [];
+  const MAX_RECENT_RESPONSES = 10;
+
+  let flushPromise: Promise<void> | null = null;
 
   async function flush() {
     if (!loggingEnabled || writeQueue.length === 0) return;
-
+    // If a flush is already in progress, wait for it then flush remaining
+    if (flushPromise) {
+      await flushPromise;
+      if (writeQueue.length === 0) return;
+    }
     const batch = writeQueue.splice(0);
-    try {
-      await appendFile(logPath, batch.join(""));
-    } catch (err) {
+    flushPromise = appendFile(logPath, batch.join("")).catch((err) => {
       process.stderr.write(
         `[flight] Warning: failed to write log: ${err instanceof Error ? err.message : err}\n`,
       );
-    }
+    });
+    await flushPromise;
+    flushPromise = null;
   }
 
   if (loggingEnabled) {
@@ -191,18 +203,19 @@ export async function createSessionLogger(logDir?: string, redactionOptions?: Re
       let prevErrorMethod: string | undefined;
 
       if (direction === "client->server") {
-        // Hallucination detection: client sent a new request after server returned an error
-        // and it's not a retry of the same tool call
-        if (lastResponseWasError) {
-          prevErrorToolName = lastErrorToolName;
-          prevErrorMethod = lastErrorMethod;
-          const isRetry = msg.method === lastErrorMethod && toolName === lastErrorToolName;
+        // Hallucination detection: check if the most recent server response was an error
+        // and this new request is for a different tool (not a retry)
+        const lastResponse = recentResponses.length > 0
+          ? recentResponses[recentResponses.length - 1]
+          : undefined;
+        if (lastResponse?.isError && (now - lastResponse.timestamp) < HALLUCINATION_WINDOW_MS) {
+          prevErrorToolName = lastResponse.toolName;
+          prevErrorMethod = lastResponse.method;
+          const isRetry = msg.method === lastResponse.method && toolName === lastResponse.toolName;
           if (!isRetry) {
             hallucinationHint = true;
           }
         }
-        lastResponseWasError = false;
-        lastErrorMethod = undefined;
 
         if (msg.id != null) {
           // Track request for latency
@@ -221,15 +234,15 @@ export async function createSessionLogger(logDir?: string, redactionOptions?: Re
           pendingRequests.delete(msg.id);
         }
 
-        // Track if this response was an error (and which method/tool it was for)
-        if (msg.error) {
-          lastResponseWasError = true;
-          lastErrorMethod = pending?.method;
-          lastErrorToolName = pending?.toolName;
-        } else {
-          lastResponseWasError = false;
-          lastErrorMethod = undefined;
-          lastErrorToolName = undefined;
+        // Track this response in the ordered list
+        recentResponses.push({
+          isError: !!msg.error,
+          method: pending?.method,
+          toolName: pending?.toolName,
+          timestamp: now,
+        });
+        if (recentResponses.length > MAX_RECENT_RESPONSES) {
+          recentResponses.shift();
         }
       }
 
@@ -242,7 +255,7 @@ export async function createSessionLogger(logDir?: string, redactionOptions?: Re
         method: msg.method ?? (msg.result !== undefined || msg.error !== undefined ? "response" : "unknown"),
         tool_name: toolName ?? undefined,
         payload: msg,
-        error: msg.error?.message,
+        error: msg.error?.message ?? (msg.error ? "(no message)" : undefined),
         hallucination_hint: hallucinationHint,
         pd_active: false,
       };
@@ -256,7 +269,7 @@ export async function createSessionLogger(logDir?: string, redactionOptions?: Re
           severity: "error",
           method: entry.method,
           tool_name: entry.tool_name,
-          message: msg.error.message,
+          message: msg.error.message ?? "(no message)",
           session_id: sessionId,
           call_id: callId,
         };
@@ -293,12 +306,25 @@ export async function createSessionLogger(logDir?: string, redactionOptions?: Re
       enqueue(redact(JSON.stringify(entry)));
     },
 
-    close() {
+    async close() {
       if (closed) return;
       closed = true;
       if (flushTimer) clearInterval(flushTimer);
-      // Final synchronous-ish flush
-      flush();
+      await flush();
+    },
+
+    closeSync() {
+      if (closed) return;
+      closed = true;
+      if (flushTimer) clearInterval(flushTimer);
+      if (loggingEnabled && writeQueue.length > 0) {
+        const batch = writeQueue.splice(0);
+        try {
+          appendFileSync(logPath, batch.join(""));
+        } catch {
+          // Best-effort in signal handler
+        }
+      }
     },
   };
 

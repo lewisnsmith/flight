@@ -34,8 +34,7 @@ describe("Secret redaction", () => {
       "client->server",
     );
 
-    logger.close();
-    await new Promise((r) => setTimeout(r, 200));
+    await logger.close();
 
     const content = await readFile(logger.logPath, "utf-8");
 
@@ -64,8 +63,7 @@ describe("Secret redaction", () => {
       "client->server",
     );
 
-    logger.close();
-    await new Promise((r) => setTimeout(r, 200));
+    await logger.close();
 
     const content = await readFile(logger.logPath, "utf-8");
 

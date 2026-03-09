@@ -17,8 +17,8 @@ afterEach(async () => {
 describe("SessionLogger", () => {
   it("creates a session with unique ID", async () => {
     const logger = await createSessionLogger(TEST_LOG_DIR);
-    expect(logger.sessionId).toMatch(/^session_\d{8}_\d{6}$/);
-    logger.close();
+    expect(logger.sessionId).toMatch(/^session_\d{8}_\d{6}_[a-f0-9]{8}$/);
+    await logger.close();
   });
 
   it("writes log entries to .jsonl file", async () => {
@@ -34,10 +34,7 @@ describe("SessionLogger", () => {
       "server->client",
     );
 
-    logger.close();
-
-    // Wait for flush
-    await new Promise((resolve) => setTimeout(resolve, 200));
+    await logger.close();
 
     const content = await readFile(logger.logPath, "utf-8");
     const lines = content.trim().split("\n").filter(Boolean);
@@ -59,9 +56,7 @@ describe("SessionLogger", () => {
     const logger = await createSessionLogger(TEST_LOG_DIR);
 
     logger.logError("upstream-stderr", "something went wrong");
-    logger.close();
-
-    await new Promise((resolve) => setTimeout(resolve, 200));
+    await logger.close();
 
     const content = await readFile(logger.logPath, "utf-8");
     const lines = content.trim().split("\n").filter(Boolean);
@@ -80,8 +75,7 @@ describe("SessionLogger", () => {
       "server->client",
     );
 
-    logger.close();
-    await new Promise((resolve) => setTimeout(resolve, 200));
+    await logger.close();
 
     const content = await readFile(logger.logPath, "utf-8");
     const entry = JSON.parse(content.trim());

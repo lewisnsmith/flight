@@ -122,8 +122,11 @@ export async function initClaudeCode(options: ClaudeCodeInitOptions = {}): Promi
   const commands: string[] = [];
   for (const [name, server] of Object.entries(wrapped)) {
     const json = JSON.stringify(server);
+    // Escape single quotes for shell safety: replace ' with '\''
+    const escapedJson = json.replace(/'/g, "'\\''");
+    const escapedName = name.replace(/'/g, "'\\''");
     const scopeFlag = scope === "project" ? " --scope project" : "";
-    commands.push(`claude mcp add-json "${name}" '${json}'${scopeFlag}`);
+    commands.push(`claude mcp add-json '${escapedName}' '${escapedJson}'${scopeFlag}`);
   }
 
   // Also write snippet for reference

@@ -53,11 +53,16 @@ function sessionIdFromFile(filename: string): string {
 async function readLogEntries(sessionFile: string): Promise<LogEntry[]> {
   const filePath = join(DEFAULT_LOG_DIR, sessionFile);
   const content = await readFile(filePath, "utf-8");
-  return content
-    .trim()
-    .split("\n")
-    .filter(Boolean)
-    .map((line) => JSON.parse(line) as LogEntry);
+  const entries: LogEntry[] = [];
+  for (const line of content.trim().split("\n")) {
+    if (!line) continue;
+    try {
+      entries.push(JSON.parse(line) as LogEntry);
+    } catch {
+      // Skip malformed lines (truncated writes, partial flushes)
+    }
+  }
+  return entries;
 }
 
 async function findSessionFile(sessionId?: string): Promise<string | null> {
@@ -138,16 +143,18 @@ export async function tailSession(sessionId?: string): Promise<void> {
   console.log(`${C.dim}  Press Ctrl+C to stop${C.reset}\n`);
 
   // Print existing entries
+  let lastLineCount = 0;
   try {
     const entries = await readLogEntries(file);
     for (const entry of entries) {
       console.log(formatEntryLine(entry));
     }
+    lastLineCount = entries.length;
   } catch {
     // File might be empty
   }
 
-  // Watch for new entries
+  // Watch for new entries — track by line count, not byte size
   let lastSize = 0;
   try {
     const s = await stat(filePath);
@@ -164,13 +171,17 @@ export async function tailSession(sessionId?: string): Promise<void> {
       const content = await readFile(filePath, "utf-8");
       const lines = content.trim().split("\n").filter(Boolean);
 
-      // Only print new lines
-      const allEntries = lines.map((l) => JSON.parse(l) as LogEntry);
-      const newEntries = allEntries.slice(-Math.max(1, allEntries.length - Math.floor(lastSize / 100)));
-
-      for (const entry of newEntries) {
-        console.log(formatEntryLine(entry));
+      // Parse only genuinely new lines
+      const newLines = lines.slice(lastLineCount);
+      for (const line of newLines) {
+        try {
+          const entry = JSON.parse(line) as LogEntry;
+          console.log(formatEntryLine(entry));
+        } catch {
+          // skip malformed lines during active writing
+        }
       }
+      lastLineCount = lines.length;
       lastSize = s.size;
     } catch {
       // ignore read errors during active writing
@@ -178,7 +189,7 @@ export async function tailSession(sessionId?: string): Promise<void> {
   });
 
   // Keep alive until Ctrl+C
-  process.on("SIGINT", () => {
+  process.once("SIGINT", () => {
     watcher.close();
     process.exit(0);
   });
@@ -283,11 +294,15 @@ export async function listAlerts(options: { limit?: number; session?: string } =
     return;
   }
 
-  let alerts = content
-    .trim()
-    .split("\n")
-    .filter(Boolean)
-    .map((line) => JSON.parse(line) as AlertEntry);
+  let alerts: AlertEntry[] = [];
+  for (const line of content.trim().split("\n")) {
+    if (!line) continue;
+    try {
+      alerts.push(JSON.parse(line) as AlertEntry);
+    } catch {
+      // Skip malformed lines
+    }
+  }
 
   if (options.session) {
     alerts = alerts.filter((a) => a.session_id.includes(options.session!));

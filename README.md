@@ -1,3 +1,5 @@
+![CI](https://github.com/lewisnsmith/flight/actions/workflows/ci.yml/badge.svg)
+
 # Flight Proxy
 
 **A local MCP flight recorder and research instrument for AI coding agents.**
@@ -42,8 +44,9 @@ The M3 experience exposed a structural problem: AI systems producing confident b
 ## Quick Start
 
 ```bash
-# Install
-npm install -g flight-proxy
+# Install from source
+git clone https://github.com/lewisnsmith/flight.git
+cd flight && npm install && npm run build && npm link
 
 # Discover your existing MCP servers and wrap them with Flight
 flight init claude
@@ -188,7 +191,7 @@ print(f"Calls: {len(entries)}, Errors: {len(errors)}, Hallucination hints: {len(
 ## Performance
 
 - **<5ms** added latency per tool call (streaming NDJSON, fire-and-forget log writes)
-- **4,000+ calls/sec** sustained throughput (benchmarked)
+- **40,000+ calls/sec** sustained throughput ([benchmarked](./bench/throughput.ts))
 - **Backpressure-aware:** proxy never accumulates unbounded in-memory buffers
 - **Disk-safe:** disables logging gracefully if free space drops below 100MB
 - **Write queue:** 1,000 entries max; drops with warning under disk pressure, never stalls the proxy
@@ -210,7 +213,6 @@ print(f"Calls: {len(entries)}, Errors: {len(errors)}, Hallucination hints: {len(
 | **Flight Proxy** | ✅ | ✅ | ✅ | planned | ✅ |
 | Reticle | ✅ | ✅ | ✅ | — | — |
 | MCP Inspector | — (browser) | ✅ | ✅ | — | — |
-| AgentLens | — | — | — | — | — |
 | Langfuse/Moesif | — | — | partial | — | — |
 
 ---
@@ -218,7 +220,8 @@ print(f"Calls: {len(entries)}, Errors: {len(errors)}, Hallucination hints: {len(
 ## Install
 
 ```bash
-npm install -g flight-proxy
+git clone https://github.com/lewisnsmith/flight.git
+cd flight && npm install && npm run build && npm link
 flight init claude
 ```
 
@@ -228,8 +231,9 @@ Requires Node.js 20+. No database, no cloud, no external dependencies.
 
 ## Documentation
 
-- [`flight-prd.md`](./flight-prd.md) — full product requirements document
-- [`plan.md`](./plan.md) — sprint plan and roadmap
+- [`docs/flight-prd.md`](./docs/flight-prd.md) — full product requirements document
+- [`docs/plan.md`](./docs/plan.md) — sprint plan and roadmap
+- [`docs/CHANGELOG.md`](./docs/CHANGELOG.md) — iteration history
 
 ---
 

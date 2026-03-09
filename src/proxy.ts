@@ -122,7 +122,16 @@ export async function startProxy(options: ProxyOptions): Promise<void> {
 
           // Retry after 500ms
           setTimeout(() => {
-            upstream.stdin!.write(JSON.stringify(originalRequest) + "\n");
+            if (!upstream.killed && upstream.stdin && !upstream.stdin.destroyed) {
+              upstream.stdin.write(JSON.stringify(originalRequest) + "\n");
+            } else {
+              // Upstream gone — forward held error to client
+              const held = pendingRetries.get(originalRequest.id!);
+              if (held) {
+                pendingRetries.delete(originalRequest.id!);
+                process.stdout.write(JSON.stringify(held) + "\n");
+              }
+            }
           }, 500);
           return;
         }
@@ -150,14 +159,19 @@ export async function startProxy(options: ProxyOptions): Promise<void> {
   });
 
   // Handle upstream exit
-  upstream.on("close", (code) => {
-    logger.close();
+  upstream.on("close", async (code) => {
+    // Flush held error responses for any pending retries so the client isn't left hanging
+    for (const heldError of pendingRetries.values()) {
+      process.stdout.write(JSON.stringify(heldError) + "\n");
+    }
+    pendingRetries.clear();
+    await logger.close();
     process.exit(code ?? 0);
   });
 
-  upstream.on("error", (err) => {
+  upstream.on("error", async (err) => {
     logger.logError("upstream-spawn-error", err.message);
-    logger.close();
+    await logger.close();
     process.exit(1);
   });
 
@@ -168,11 +182,13 @@ export async function startProxy(options: ProxyOptions): Promise<void> {
 
   process.on("SIGTERM", () => {
     upstream.kill();
-    logger.close();
+    logger.closeSync();
+    process.exit(0);
   });
 
   process.on("SIGINT", () => {
     upstream.kill();
-    logger.close();
+    logger.closeSync();
+    process.exit(0);
   });
 }
