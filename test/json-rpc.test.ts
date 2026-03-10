@@ -23,7 +23,7 @@ describe("parseJsonRpcStream", () => {
     const parser = parseJsonRpcStream(stream);
     parser.on("message", (msg) => messages.push(msg));
 
-    await new Promise((resolve) => parser.on("close", resolve));
+    await new Promise<void>((resolve) => parser.on("close", () => resolve()));
 
     expect(messages).toHaveLength(1);
     expect(messages[0].method).toBe("tools/list");
@@ -41,7 +41,7 @@ describe("parseJsonRpcStream", () => {
     const parser = parseJsonRpcStream(stream);
     parser.on("message", (msg) => messages.push(msg));
 
-    await new Promise((resolve) => parser.on("close", resolve));
+    await new Promise<void>((resolve) => parser.on("close", () => resolve()));
 
     expect(messages).toHaveLength(3);
   });
@@ -58,7 +58,7 @@ describe("parseJsonRpcStream", () => {
     const parser = parseJsonRpcStream(stream);
     parser.on("message", (msg) => messages.push(msg));
 
-    await new Promise((resolve) => parser.on("close", resolve));
+    await new Promise<void>((resolve) => parser.on("close", () => resolve()));
 
     expect(messages).toHaveLength(1);
   });
@@ -70,7 +70,7 @@ describe("parseJsonRpcStream", () => {
     const parser = parseJsonRpcStream(stream);
     parser.on("error", (err) => errors.push(err));
 
-    await new Promise((resolve) => parser.on("close", resolve));
+    await new Promise<void>((resolve) => parser.on("close", () => resolve()));
 
     expect(errors).toHaveLength(1);
     expect(errors[0].message).toContain("Invalid JSON-RPC");

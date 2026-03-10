@@ -1,5 +1,7 @@
 # Product Requirements Document: Flight Proxy
 
+> **Status:** This document describes the full v1.0 vision. For current implementation status, see the [README](../README.md).
+
 ## Overview
 
 **Product Name:** Flight Proxy

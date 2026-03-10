@@ -126,8 +126,12 @@ describe("Alert System", () => {
 
     const content = await readFile(alertPath, "utf-8");
     const lines = content.trim().split("\n").filter(Boolean);
-    const lastAlert = JSON.parse(lines[lines.length - 1]) as AlertEntry;
+    const sessionAlerts = lines
+      .map((l) => JSON.parse(l) as AlertEntry)
+      .filter((a) => a.session_id === logger.sessionId);
 
+    expect(sessionAlerts.length).toBeGreaterThanOrEqual(1);
+    const lastAlert = sessionAlerts[sessionAlerts.length - 1];
     expect(lastAlert.severity).toBe("error");
     expect(lastAlert.message).toBe("Search failed");
   });

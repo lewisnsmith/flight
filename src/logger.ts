@@ -171,7 +171,7 @@ export async function createSessionLogger(logDir?: string, redactionOptions?: Re
   }
 
   function enqueue(line: string) {
-    if (!loggingEnabled) return;
+    if (!loggingEnabled || closed) return;
     if (logSizeCapped) return;
     if (writeQueue.length >= MAX_QUEUE_DEPTH) {
       process.stderr.write("[flight] Warning: log queue full, dropping entry\n");
@@ -203,17 +203,20 @@ export async function createSessionLogger(logDir?: string, redactionOptions?: Re
       let prevErrorMethod: string | undefined;
 
       if (direction === "client->server") {
-        // Hallucination detection: check if the most recent server response was an error
-        // and this new request is for a different tool (not a retry)
-        const lastResponse = recentResponses.length > 0
-          ? recentResponses[recentResponses.length - 1]
-          : undefined;
-        if (lastResponse?.isError && (now - lastResponse.timestamp) < HALLUCINATION_WINDOW_MS) {
-          prevErrorToolName = lastResponse.toolName;
-          prevErrorMethod = lastResponse.method;
-          const isRetry = msg.method === lastResponse.method && toolName === lastResponse.toolName;
-          if (!isRetry) {
-            hallucinationHint = true;
+        // Hallucination detection: only applies to tools/call requests following a tools/call error
+        // (not notifications, resources/list, or other non-tool methods)
+        if (msg.method === "tools/call") {
+          const lastResponse = recentResponses.length > 0
+            ? recentResponses[recentResponses.length - 1]
+            : undefined;
+          if (lastResponse?.isError && lastResponse.method === "tools/call"
+              && (now - lastResponse.timestamp) < HALLUCINATION_WINDOW_MS) {
+            prevErrorToolName = lastResponse.toolName;
+            prevErrorMethod = lastResponse.method;
+            const isRetry = toolName === lastResponse.toolName;
+            if (!isRetry) {
+              hallucinationHint = true;
+            }
           }
         }
 

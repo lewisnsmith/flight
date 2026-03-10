@@ -160,11 +160,19 @@ export async function startProxy(options: ProxyOptions): Promise<void> {
 
   // Handle upstream exit
   upstream.on("close", async (code) => {
-    // Flush held error responses for any pending retries so the client isn't left hanging
+    // Flush held error responses for any pending retries
     for (const heldError of pendingRetries.values()) {
       process.stdout.write(JSON.stringify(heldError) + "\n");
     }
     pendingRetries.clear();
+    // Send error responses for any requests that never got a reply
+    for (const [id] of pendingClientRequests) {
+      process.stdout.write(JSON.stringify({
+        jsonrpc: "2.0", id,
+        error: { code: -32000, message: "Upstream process exited" },
+      }) + "\n");
+    }
+    pendingClientRequests.clear();
     await logger.close();
     process.exit(code ?? 0);
   });

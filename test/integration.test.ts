@@ -1,5 +1,5 @@
 import { describe, it, expect, afterEach } from "vitest";
-import { spawn, type ChildProcess } from "node:child_process";
+import { spawn } from "node:child_process";
 import { readFile, rm, readdir } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -8,24 +8,6 @@ import type { LogEntry } from "../src/logger.js";
 
 const MOCK_SERVER = join(import.meta.dirname, "mock-mcp-server.ts");
 const PROXY_MODULE = join(import.meta.dirname, "..", "src", "proxy.ts");
-
-function spawnProxy(logDir: string): ChildProcess {
-  // Use tsx to run the proxy directly, pointing at the mock server via tsx
-  const proxy = spawn(
-    "npx",
-    ["tsx", PROXY_MODULE],
-    {
-      stdio: ["pipe", "pipe", "pipe"],
-      env: {
-        ...process.env,
-        FLIGHT_LOG_DIR: logDir,
-        FLIGHT_CMD: "npx",
-        FLIGHT_ARGS: `tsx ${MOCK_SERVER}`,
-      },
-    },
-  );
-  return proxy;
-}
 
 /**
  * Spawns a proxy process that wraps the mock MCP server,

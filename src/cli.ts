@@ -1,14 +1,18 @@
 import { Command } from "commander";
+import { createRequire } from "node:module";
 import { startProxy } from "./proxy.js";
 import { initClaude, initClaudeCode, getClaudeConfigPath, getClaudeCodeConfigPath } from "./init.js";
 import { listSessions, tailSession, viewSession, filterSessions, inspectCall, listAlerts } from "./log-commands.js";
+
+const require = createRequire(import.meta.url);
+const pkg = require("../package.json") as { version: string };
 
 const program = new Command();
 
 program
   .name("flight")
   .description("MCP flight recorder and token optimizer for AI coding agents")
-  .version("0.2.0");
+  .version(pkg.version);
 
 program
   .command("proxy")

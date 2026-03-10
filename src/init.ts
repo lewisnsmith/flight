@@ -30,8 +30,12 @@ export function wrapWithFlight(servers: Record<string, McpServerEntry>): Record<
   const wrapped: Record<string, McpServerEntry> = {};
 
   for (const [name, server] of Object.entries(servers)) {
-    // Skip if already wrapped
+    // Skip if already wrapped (direct invocation or via npx)
     if (server.command === "flight" || server.command === "flight-proxy") {
+      wrapped[name] = server;
+      continue;
+    }
+    if (server.args?.[0] === "flight" && server.args?.[1] === "proxy") {
       wrapped[name] = server;
       continue;
     }
@@ -118,15 +122,17 @@ export async function initClaudeCode(options: ClaudeCodeInitOptions = {}): Promi
     };
   }
 
-  // Non-apply mode: print claude mcp add-json commands
+  // Non-apply mode: print claude mcp add-json commands (only for real configs)
   const commands: string[] = [];
-  for (const [name, server] of Object.entries(wrapped)) {
-    const json = JSON.stringify(server);
-    // Escape single quotes for shell safety: replace ' with '\''
-    const escapedJson = json.replace(/'/g, "'\\''");
-    const escapedName = name.replace(/'/g, "'\\''");
-    const scopeFlag = scope === "project" ? " --scope project" : "";
-    commands.push(`claude mcp add-json '${escapedName}' '${escapedJson}'${scopeFlag}`);
+  if (configFound) {
+    for (const [name, server] of Object.entries(wrapped)) {
+      const json = JSON.stringify(server);
+      // Escape single quotes for shell safety: replace ' with '\''
+      const escapedJson = json.replace(/'/g, "'\\''");
+      const escapedName = name.replace(/'/g, "'\\''");
+      const scopeFlag = scope === "project" ? " --scope project" : "";
+      commands.push(`claude mcp add-json '${escapedName}' '${escapedJson}'${scopeFlag}`);
+    }
   }
 
   // Also write snippet for reference

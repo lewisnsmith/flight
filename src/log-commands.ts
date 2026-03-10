@@ -1,4 +1,4 @@
-import { readdir, readFile, stat } from "node:fs/promises";
+import { readdir, readFile, stat, open } from "node:fs/promises";
 import { join } from "node:path";
 import { homedir } from "node:os";
 import { watch } from "node:fs";
@@ -163,36 +163,49 @@ export async function tailSession(sessionId?: string): Promise<void> {
     // ignore
   }
 
+  let partialLine = "";
+
   const watcher = watch(filePath, async () => {
     try {
       const s = await stat(filePath);
       if (s.size <= lastSize) return;
 
-      const content = await readFile(filePath, "utf-8");
-      const lines = content.trim().split("\n").filter(Boolean);
+      // Read only new bytes from the file
+      const fd = await open(filePath, "r");
+      try {
+        const newBytes = Buffer.alloc(s.size - lastSize);
+        await fd.read(newBytes, 0, newBytes.length, lastSize);
+        const chunk = partialLine + newBytes.toString("utf-8");
+        const lines = chunk.split("\n");
 
-      // Parse only genuinely new lines
-      const newLines = lines.slice(lastLineCount);
-      for (const line of newLines) {
-        try {
-          const entry = JSON.parse(line) as LogEntry;
-          console.log(formatEntryLine(entry));
-        } catch {
-          // skip malformed lines during active writing
+        // Last element may be a partial line (no trailing newline yet)
+        partialLine = lines.pop() ?? "";
+
+        for (const line of lines) {
+          if (!line.trim()) continue;
+          try {
+            const entry = JSON.parse(line) as LogEntry;
+            console.log(formatEntryLine(entry));
+          } catch {
+            // skip malformed lines during active writing
+          }
         }
+        lastSize = s.size;
+      } finally {
+        await fd.close();
       }
-      lastLineCount = lines.length;
-      lastSize = s.size;
     } catch {
       // ignore read errors during active writing
     }
   });
 
-  // Keep alive until Ctrl+C
-  process.once("SIGINT", () => {
+  // Keep alive until terminated
+  const cleanup = () => {
     watcher.close();
     process.exit(0);
-  });
+  };
+  process.once("SIGINT", cleanup);
+  process.once("SIGTERM", cleanup);
 
   await new Promise(() => {}); // block forever
 }
@@ -234,7 +247,8 @@ export async function filterSessions(options: {
   let entries = await readLogEntries(file);
 
   if (options.tool) {
-    entries = entries.filter((e) => e.tool_name === options.tool || e.method.includes(options.tool!));
+    const toolFilter = options.tool;
+    entries = entries.filter((e) => e.tool_name === toolFilter || e.method.includes(toolFilter));
   }
   if (options.errors) {
     entries = entries.filter((e) => e.error);

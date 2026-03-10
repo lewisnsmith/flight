@@ -102,8 +102,6 @@ describe("initClaudeCode", () => {
     };
     await writeFile(testConfigPath, JSON.stringify(config));
 
-    // Monkey-patch getClaudeCodeConfigPath for testing
-    const origCwd = process.cwd;
     const origHome = process.env.HOME;
     process.env.HOME = testDir;
 

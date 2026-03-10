@@ -14,6 +14,7 @@ export interface JsonRpcMessage {
 export interface JsonRpcParser extends EventEmitter {
   on(event: "message", listener: (msg: JsonRpcMessage) => void): this;
   on(event: "error", listener: (err: Error) => void): this;
+  on(event: "close", listener: () => void): this;
 }
 
 export function parseJsonRpcStream(input: Readable): JsonRpcParser {
