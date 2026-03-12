@@ -261,3 +261,17 @@ If time runs short, cut in this order (bottom first):
 - **v1.1:** Multi-server PD, `flight analyze` command, Parquet export
 - **v1.2:** Experiment mode (`--condition` labels for A/B), anomaly detection
 - **v2.0:** HTTP transport, non-MCP framework support, plugin system, potential Rust rewrite
+
+## Future: Claude Code Extension
+
+If Claude Code ships a formal extension/plugin API, Flight could migrate from the current
+proxy + hooks architecture to a native extension. This would enable:
+
+- Deeper UI integration (inline panels, status indicators)
+- Direct access to Claude's context window for smarter PD
+- No MCP config wrapping needed at all
+
+For now, the proxy + Claude Code hooks approach (`flight setup`) is the pragmatic choice
+that works with the current Claude Code architecture. The zero-config setup via hooks
+(SessionStart/SessionEnd) combined with MCP config wrapping provides the best balance
+of integration depth and stability.

@@ -1,7 +1,10 @@
 import { readdir, readFile, stat, open } from "node:fs/promises";
 import { join } from "node:path";
 import { homedir } from "node:os";
-import { watch } from "node:fs";
+import { watch, createReadStream } from "node:fs";
+import { createGunzip } from "node:zlib";
+import { pipeline } from "node:stream/promises";
+import { Writable } from "node:stream";
 import type { LogEntry, AlertEntry } from "./logger.js";
 import { getAlertLogPath } from "./logger.js";
 
@@ -38,7 +41,7 @@ async function getLogFiles(): Promise<string[]> {
   try {
     const files = await readdir(DEFAULT_LOG_DIR);
     return files
-      .filter((f) => f.endsWith(".jsonl"))
+      .filter((f) => f.endsWith(".jsonl") || f.endsWith(".jsonl.gz"))
       .sort()
       .reverse();
   } catch {
@@ -50,9 +53,19 @@ function sessionIdFromFile(filename: string): string {
   return filename.replace(".jsonl", "").replace(".gz", "");
 }
 
-async function readLogEntries(sessionFile: string): Promise<LogEntry[]> {
-  const filePath = join(DEFAULT_LOG_DIR, sessionFile);
-  const content = await readFile(filePath, "utf-8");
+async function readGzFile(filePath: string): Promise<string> {
+  const chunks: Buffer[] = [];
+  const collector = new Writable({
+    write(chunk: Buffer, _encoding, callback) {
+      chunks.push(chunk);
+      callback();
+    },
+  });
+  await pipeline(createReadStream(filePath), createGunzip(), collector);
+  return Buffer.concat(chunks).toString("utf-8");
+}
+
+function parseLogLines(content: string): LogEntry[] {
   const entries: LogEntry[] = [];
   for (const line of content.trim().split("\n")) {
     if (!line) continue;
@@ -63,6 +76,14 @@ async function readLogEntries(sessionFile: string): Promise<LogEntry[]> {
     }
   }
   return entries;
+}
+
+async function readLogEntries(sessionFile: string): Promise<LogEntry[]> {
+  const filePath = join(DEFAULT_LOG_DIR, sessionFile);
+  const content = sessionFile.endsWith(".gz")
+    ? await readGzFile(filePath)
+    : await readFile(filePath, "utf-8");
+  return parseLogLines(content);
 }
 
 async function findSessionFile(sessionId?: string): Promise<string | null> {

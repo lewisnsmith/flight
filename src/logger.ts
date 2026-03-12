@@ -17,6 +17,7 @@ export interface LogEntry {
   error?: string;
   hallucination_hint?: boolean;
   pd_active: boolean;
+  schema_tokens_saved?: number;
 }
 
 export interface AlertEntry {

@@ -2,12 +2,14 @@ import { Command } from "commander";
 import { createRequire } from "node:module";
 import { startProxy } from "./proxy.js";
 import { initClaude, initClaudeCode, getClaudeConfigPath, getClaudeCodeConfigPath } from "./init.js";
-import { listSessions, tailSession, viewSession, filterSessions, inspectCall, listAlerts, readLogEntriesForSession } from "./log-commands.js";
+import { listSessions, tailSession, viewSession, filterSessions, inspectCall, listAlerts, readLogEntriesForSession, readAllRecentSessions } from "./log-commands.js";
 import { computeSummary, formatSummary } from "./summary.js";
 import { entriesToCsv, entriesToJsonl } from "./export.js";
 import { writeFile as fsWriteFile } from "node:fs/promises";
 import { runSetup, runRemove } from "./setup.js";
 import { handleSessionStart, handleSessionEnd } from "./hooks.js";
+import { compressOldSessions, garbageCollect, pruneSessions } from "./lifecycle.js";
+import { computeStats, computeAggregateStats, formatStats, formatAggregateStats } from "./stats.js";
 
 const require = createRequire(import.meta.url);
 const pkg = require("../package.json") as { version: string };
@@ -25,13 +27,15 @@ program
   .requiredOption("--cmd <command>", "Upstream MCP server command")
   .option("--quiet", "Suppress non-critical stderr output")
   .option("--no-retry", "Disable auto-retry for read-only tool calls")
+  .option("--pd", "Enable progressive disclosure (replace tool schemas with meta-tools)")
   .argument("[args...]", "Arguments to pass to upstream command")
-  .action(async (args: string[], options: { cmd: string; quiet?: boolean; retry: boolean }) => {
+  .action(async (args: string[], options: { cmd: string; quiet?: boolean; retry: boolean; pd?: boolean }) => {
     await startProxy({
       command: options.cmd,
       args,
       quiet: options.quiet,
       noRetry: !options.retry,
+      pd: options.pd,
     });
   });
 
@@ -160,6 +164,60 @@ log
     console.log(formatSummary(summary));
   });
 
+log
+  .command("gc")
+  .option("--max-sessions <n>", "Maximum sessions to keep", "100")
+  .option("--max-bytes <n>", "Maximum total bytes", String(2 * 1024 * 1024 * 1024))
+  .option("--compress-after <hours>", "Compress sessions older than N hours", "24")
+  .option("--dry-run", "Show what would be deleted without deleting")
+  .description("Garbage-collect old session logs")
+  .action(async (options: { maxSessions?: string; maxBytes?: string; compressAfter?: string; dryRun?: boolean }) => {
+    const maxAgeMs = (parseInt(options.compressAfter ?? "24", 10)) * 60 * 60 * 1000;
+    const compressResult = await compressOldSessions(undefined, { maxAgeMs });
+    if (compressResult.compressed > 0) {
+      console.log(`\x1b[32m✓\x1b[0m Compressed ${compressResult.compressed} old session(s)`);
+    }
+
+    const gcResult = await garbageCollect(undefined, {
+      maxSessions: parseInt(options.maxSessions ?? "100", 10),
+      maxBytes: parseInt(options.maxBytes ?? String(2 * 1024 * 1024 * 1024), 10),
+      dryRun: options.dryRun,
+    });
+
+    if (gcResult.dryRun) {
+      console.log(`\x1b[33m!\x1b[0m Dry run: would delete ${gcResult.deleted} session(s), freeing ${(gcResult.freedBytes / 1024 / 1024).toFixed(1)} MB`);
+    } else if (gcResult.deleted > 0) {
+      console.log(`\x1b[32m✓\x1b[0m Deleted ${gcResult.deleted} session(s), freed ${(gcResult.freedBytes / 1024 / 1024).toFixed(1)} MB`);
+    } else {
+      console.log(`\x1b[32m✓\x1b[0m Nothing to clean up`);
+    }
+  });
+
+log
+  .command("prune")
+  .option("--before <date>", "Delete sessions before this date (ISO 8601)")
+  .option("--keep <n>", "Keep only the N most recent sessions")
+  .description("Prune session logs by date or count")
+  .action(async (options: { before?: string; keep?: string }) => {
+    const pruneOpts: { before?: Date; keep?: number } = {};
+    if (options.before) {
+      pruneOpts.before = new Date(options.before);
+    }
+    if (options.keep) {
+      pruneOpts.keep = parseInt(options.keep, 10);
+    }
+    if (!pruneOpts.before && pruneOpts.keep === undefined) {
+      console.error("Specify --before <date> or --keep <n>");
+      process.exit(1);
+    }
+    const result = await pruneSessions(undefined, pruneOpts);
+    if (result.deleted > 0) {
+      console.log(`\x1b[32m✓\x1b[0m Pruned ${result.deleted} session(s)`);
+    } else {
+      console.log(`\x1b[32m✓\x1b[0m Nothing to prune`);
+    }
+  });
+
 // --- Export command ---
 
 program
@@ -206,6 +264,32 @@ program
       console.log(`Exported ${entries.length} entries to ${options.output}`);
     } else {
       process.stdout.write(output);
+    }
+  });
+
+// --- Stats command ---
+
+program
+  .command("stats")
+  .argument("[session]", "Session ID (default: most recent, omit for aggregate)")
+  .description("Show token savings and call statistics")
+  .action(async (session?: string) => {
+    if (session) {
+      const entries = await readLogEntriesForSession(session);
+      if (!entries || entries.length === 0) {
+        console.log("No session data found.");
+        return;
+      }
+      const stats = computeStats(entries);
+      console.log(formatStats(stats));
+    } else {
+      const sessions = await readAllRecentSessions(10);
+      if (sessions.length === 0) {
+        console.log("No sessions found.");
+        return;
+      }
+      const aggregate = computeAggregateStats(sessions);
+      console.log(formatAggregateStats(aggregate));
     }
   });
 

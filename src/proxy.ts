@@ -1,6 +1,9 @@
 import { spawn, type ChildProcess } from "node:child_process";
+import { join } from "node:path";
+import { homedir } from "node:os";
 import { parseJsonRpcStream, type JsonRpcMessage } from "./json-rpc.js";
 import { createSessionLogger, type AlertEntry } from "./logger.js";
+import { createPDHandler, type PDHandler, type ToolSchema } from "./progressive-disclosure.js";
 
 export interface ProxyOptions {
   command: string;
@@ -8,6 +11,7 @@ export interface ProxyOptions {
   logDir?: string;
   quiet?: boolean;
   noRetry?: boolean;
+  pd?: boolean;
 }
 
 // Read-only tool names safe to auto-retry on error
@@ -69,6 +73,15 @@ export async function startProxy(options: ProxyOptions): Promise<void> {
     }
   };
 
+  // Progressive disclosure
+  const pdEnabled = options.pd ?? false;
+  let pdHandler: PDHandler | null = null;
+
+  if (pdEnabled) {
+    const cacheDir = join(homedir(), ".flight", "schemas");
+    pdHandler = createPDHandler(cacheDir);
+  }
+
   const upstream: ChildProcess = spawn(options.command, options.args, {
     stdio: ["pipe", "pipe", "pipe"],
   });
@@ -85,6 +98,62 @@ export async function startProxy(options: ProxyOptions): Promise<void> {
   // Client → Upstream: forward stdin and log
   const clientParser = parseJsonRpcStream(process.stdin);
   clientParser.on("message", (msg) => {
+    // PD: intercept discover_tools and execute_tool calls
+    if (pdHandler && pdHandler.isActive() && msg.method === "tools/call" && msg.params) {
+      const params = msg.params as Record<string, unknown>;
+      const toolName = params.name as string;
+
+      if (toolName === "discover_tools") {
+        const args = params.arguments as Record<string, unknown>;
+        const query = (args?.query as string) ?? "";
+        const results = pdHandler.discoverTools(query);
+        const response = {
+          jsonrpc: "2.0",
+          id: msg.id,
+          result: {
+            content: [{ type: "text", text: JSON.stringify(results, null, 2) }],
+          },
+        };
+        logger.log(msg, "client->server");
+        logger.log(response as JsonRpcMessage, "server->client");
+        process.stdout.write(JSON.stringify(response) + "\n");
+        return;
+      }
+
+      if (toolName === "execute_tool") {
+        const args = params.arguments as Record<string, unknown>;
+        const realToolName = args?.tool_name as string;
+        const realArgs = (args?.arguments ?? {}) as Record<string, unknown>;
+        const resolved = pdHandler.resolveExecuteTool(realToolName, realArgs);
+
+        if (!resolved) {
+          const errResponse = {
+            jsonrpc: "2.0",
+            id: msg.id,
+            error: { code: -32602, message: `Unknown tool: ${realToolName}. Use discover_tools to find available tools.` },
+          };
+          logger.log(msg, "client->server");
+          logger.log(errResponse as JsonRpcMessage, "server->client");
+          process.stdout.write(JSON.stringify(errResponse) + "\n");
+          return;
+        }
+
+        // Rewrite to real tools/call
+        const realRequest: JsonRpcMessage = {
+          jsonrpc: "2.0",
+          id: msg.id,
+          method: "tools/call",
+          params: { name: resolved.toolName, arguments: resolved.arguments },
+        };
+        logger.log(msg, "client->server");
+        if (retryEnabled && msg.id != null) {
+          pendingClientRequests.set(msg.id, realRequest);
+        }
+        upstream.stdin!.write(JSON.stringify(realRequest) + "\n");
+        return;
+      }
+    }
+
     logger.log(msg, "client->server");
     if (retryEnabled && msg.id != null) {
       pendingClientRequests.set(msg.id, msg);
@@ -138,6 +207,27 @@ export async function startProxy(options: ProxyOptions): Promise<void> {
               }
             }
           }, 500);
+          return;
+        }
+      }
+    }
+
+    // PD: intercept tools/list responses to replace with meta-tools
+    if (pdHandler && msg.result && !msg.error && msg.id != null) {
+      const originalRequest = pendingClientRequests.get(msg.id);
+      if (originalRequest?.method === "tools/list" && msg.result) {
+        const result = msg.result as Record<string, unknown>;
+        const tools = result.tools as ToolSchema[] | undefined;
+        if (tools && Array.isArray(tools)) {
+          pdHandler.loadSchemas(tools);
+          const rewritten = {
+            jsonrpc: "2.0",
+            id: msg.id,
+            result: { tools: pdHandler.getMetaToolSchemas() },
+          };
+          pendingClientRequests.delete(msg.id);
+          logger.log(rewritten as JsonRpcMessage, "server->client");
+          process.stdout.write(JSON.stringify(rewritten) + "\n");
           return;
         }
       }

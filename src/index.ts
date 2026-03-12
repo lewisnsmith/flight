@@ -3,3 +3,8 @@ export { type LogEntry, type AlertEntry } from "./logger.js";
 export { initClaude, initClaudeCode, getClaudeConfigPath, getClaudeCodeConfigPath, wrapWithFlight } from "./init.js";
 export { runSetup, runRemove, type SetupResult, type SetupOptions } from "./setup.js";
 export { installHooks, removeHooks } from "./hooks.js";
+export { computeSummary, formatSummary, type SessionSummary } from "./summary.js";
+export { entriesToCsv, entriesToJsonl } from "./export.js";
+export { compressOldSessions, garbageCollect, pruneSessions } from "./lifecycle.js";
+export { computeStats, formatStats, type SessionStats } from "./stats.js";
+export { createPDHandler, type PDHandler, type ToolSchema } from "./progressive-disclosure.js";

@@ -1,6 +1,9 @@
-import { readFile, writeFile, copyFile, mkdir } from "node:fs/promises";
+import { readFile, writeFile, copyFile, mkdir, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { homedir } from "node:os";
+import { compressOldSessions, garbageCollect } from "./lifecycle.js";
+import { computeSummary, formatSummary } from "./summary.js";
+import { readLogEntriesForSession } from "./log-commands.js";
 
 interface HookEntry {
   type: string;
@@ -143,5 +146,27 @@ export async function handleSessionEnd(stdinJson: string, logDir?: string): Prom
   }
 
   const sessionId = input.session_id ?? "unknown";
-  return `[flight] Session ${sessionId} ended`;
+  const dir = logDir ?? join(homedir(), ".flight", "logs");
+
+  // Remove active session marker
+  const markerPath = join(dir, `.active_session`);
+  await rm(markerPath, { force: true }).catch(() => {});
+
+  // Generate session summary
+  let output = `[flight] Session ${sessionId} ended`;
+  try {
+    const entries = await readLogEntriesForSession();
+    if (entries && entries.length > 0) {
+      const summary = computeSummary(entries);
+      output = `\n${formatSummary(summary)}\n`;
+    }
+  } catch {
+    // Summary is best-effort
+  }
+
+  // Auto-compress and garbage collect (fire and forget)
+  compressOldSessions(dir).catch(() => {});
+  garbageCollect(dir).catch(() => {});
+
+  return output;
 }
