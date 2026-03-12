@@ -21,7 +21,7 @@ export interface LogEntry {
 
 export interface AlertEntry {
   timestamp: string;
-  severity: "error" | "hallucination";
+  severity: "error" | "hallucination" | "loop";
   method: string;
   tool_name?: string;
   message: string;
@@ -147,6 +147,47 @@ export async function createSessionLogger(logDir?: string, redactionOptions?: Re
   const recentResponses: RecentResponse[] = [];
   const MAX_RECENT_RESPONSES = 10;
 
+  // Loop detection: track tool+args hash → timestamps
+  const LOOP_THRESHOLD = 5;
+  const LOOP_WINDOW_MS = 60_000;
+  const loopTracker = new Map<string, number[]>();
+
+  function computeArgsHash(params: unknown): string {
+    if (!params || typeof params !== "object") return "";
+    const p = params as Record<string, unknown>;
+    return JSON.stringify(p.arguments ?? "");
+  }
+
+  function checkLoop(toolName: string, params: unknown, now: number, callId: string): void {
+    const key = `${toolName}:${computeArgsHash(params)}`;
+    let timestamps = loopTracker.get(key);
+    if (!timestamps) {
+      timestamps = [];
+      loopTracker.set(key, timestamps);
+    }
+
+    timestamps.push(now);
+    // Trim old timestamps outside window
+    const cutoff = now - LOOP_WINDOW_MS;
+    while (timestamps.length > 0 && timestamps[0] < cutoff) {
+      timestamps.shift();
+    }
+
+    if (timestamps.length >= LOOP_THRESHOLD && timestamps.length === LOOP_THRESHOLD) {
+      const alert: AlertEntry = {
+        timestamp: new Date(now).toISOString(),
+        severity: "loop",
+        method: "tools/call",
+        tool_name: toolName,
+        message: `${toolName} called ${LOOP_THRESHOLD}x with same args in ${LOOP_WINDOW_MS / 1000}s`,
+        session_id: sessionId,
+        call_id: callId,
+      };
+      writeAlert(alert);
+      if (logger.onAlert) logger.onAlert(alert);
+    }
+  }
+
   let flushPromise: Promise<void> | null = null;
 
   async function flush() {
@@ -217,6 +258,11 @@ export async function createSessionLogger(logDir?: string, redactionOptions?: Re
             if (!isRetry) {
               hallucinationHint = true;
             }
+          }
+
+          // Loop detection
+          if (toolName) {
+            checkLoop(toolName, msg.params, now, callId);
           }
         }
 

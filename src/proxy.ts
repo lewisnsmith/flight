@@ -53,11 +53,16 @@ export async function startProxy(options: ProxyOptions): Promise<void> {
 
   // Wire up alert callback for stderr output
   logger.onAlert = (alert: AlertEntry) => {
+    if (quiet) return;
     if (alert.severity === "hallucination") {
       process.stderr.write(
         `\x1b[33m[flight] HALLUCINATION HINT: ${alert.message}\x1b[0m\n`,
       );
-    } else if (alert.severity === "error" && !quiet) {
+    } else if (alert.severity === "loop") {
+      process.stderr.write(
+        `\x1b[33m[flight] LOOP DETECTED: ${alert.message}\x1b[0m\n`,
+      );
+    } else if (alert.severity === "error") {
       process.stderr.write(
         `\x1b[31m[flight] TOOL ERROR: ${alert.tool_name ?? alert.method} — ${alert.message}\x1b[0m\n`,
       );
