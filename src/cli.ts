@@ -3,6 +3,8 @@ import { createRequire } from "node:module";
 import { startProxy } from "./proxy.js";
 import { initClaude, initClaudeCode, getClaudeConfigPath, getClaudeCodeConfigPath } from "./init.js";
 import { listSessions, tailSession, viewSession, filterSessions, inspectCall, listAlerts } from "./log-commands.js";
+import { runSetup, runRemove } from "./setup.js";
+import { handleSessionStart, handleSessionEnd } from "./hooks.js";
 
 const require = createRequire(import.meta.url);
 const pkg = require("../package.json") as { version: string };
@@ -139,6 +141,78 @@ log
   .description("Show recent alerts across all sessions")
   .action(async (options: { limit?: string; session?: string }) => {
     await listAlerts({ limit: options.limit ? parseInt(options.limit, 10) : undefined, session: options.session });
+  });
+
+// --- Setup command ---
+
+program
+  .command("setup")
+  .description("Auto-configure Flight with Claude Code (wraps MCP servers + installs hooks)")
+  .option("--remove", "Remove Flight hooks and restore original config")
+  .action(async (options: { remove?: boolean }) => {
+    if (options.remove) {
+      const result = await runRemove();
+      if (result.hooksRemoved) {
+        console.log(`\x1b[32m✓\x1b[0m Removed Flight hooks from Claude Code settings`);
+      } else {
+        console.log(`\x1b[33m!\x1b[0m No Flight hooks found to remove`);
+      }
+      if (result.configRestored) {
+        console.log(`\x1b[32m✓\x1b[0m Restored original MCP config from backup`);
+      }
+      return;
+    }
+
+    const result = await runSetup();
+
+    if (result.hooksInstalled) {
+      console.log(`\x1b[32m✓\x1b[0m Installed Claude Code hooks (SessionStart, SessionEnd)`);
+    } else {
+      console.log(`\x1b[33m!\x1b[0m Hooks already installed`);
+    }
+
+    if (result.serversWrapped > 0) {
+      console.log(`\x1b[32m✓\x1b[0m Wrapped ${result.serversWrapped} MCP server(s): ${result.serverNames.join(", ")}`);
+      if (result.configBackedUp) {
+        console.log(`  Backup saved to ~/.claude.json.bak`);
+      }
+    } else if (result.serverNames.length > 0) {
+      console.log(`\x1b[33m!\x1b[0m All ${result.serverNames.length} server(s) already wrapped`);
+    } else {
+      console.log(`\x1b[33m!\x1b[0m No MCP servers found in ~/.claude.json`);
+    }
+
+    console.log(`\n\x1b[32m✓\x1b[0m Flight is ready. Start a Claude Code session — recording is automatic.`);
+    console.log(`  Run \x1b[36mflight log tail\x1b[0m in another terminal to watch live.`);
+  });
+
+// --- Hook commands (internal, called by Claude Code) ---
+
+const hook = new Command("hook").description("Internal hook handlers (called by Claude Code)");
+program.addCommand(hook);
+
+hook
+  .command("session-start")
+  .description("Handle SessionStart hook")
+  .action(async () => {
+    let stdin = "";
+    for await (const chunk of process.stdin) {
+      stdin += chunk;
+    }
+    const output = await handleSessionStart(stdin);
+    process.stderr.write(output + "\n");
+  });
+
+hook
+  .command("session-end")
+  .description("Handle SessionEnd hook")
+  .action(async () => {
+    let stdin = "";
+    for await (const chunk of process.stdin) {
+      stdin += chunk;
+    }
+    const output = await handleSessionEnd(stdin);
+    process.stderr.write(output + "\n");
   });
 
 program.parse();
