@@ -2,7 +2,8 @@ import { Command } from "commander";
 import { createRequire } from "node:module";
 import { startProxy } from "./proxy.js";
 import { initClaude, initClaudeCode, getClaudeConfigPath, getClaudeCodeConfigPath } from "./init.js";
-import { listSessions, tailSession, viewSession, filterSessions, inspectCall, listAlerts } from "./log-commands.js";
+import { listSessions, tailSession, viewSession, filterSessions, inspectCall, listAlerts, readLogEntriesForSession } from "./log-commands.js";
+import { computeSummary, formatSummary } from "./summary.js";
 import { runSetup, runRemove } from "./setup.js";
 import { handleSessionStart, handleSessionEnd } from "./hooks.js";
 
@@ -141,6 +142,20 @@ log
   .description("Show recent alerts across all sessions")
   .action(async (options: { limit?: string; session?: string }) => {
     await listAlerts({ limit: options.limit ? parseInt(options.limit, 10) : undefined, session: options.session });
+  });
+
+log
+  .command("summary")
+  .argument("[session]", "Session ID (default: most recent)")
+  .description("One-screen summary of a session")
+  .action(async (session?: string) => {
+    const entries = await readLogEntriesForSession(session);
+    if (!entries || entries.length === 0) {
+      console.log("No session data found.");
+      return;
+    }
+    const summary = computeSummary(entries);
+    console.log(formatSummary(summary));
   });
 
 // --- Setup command ---

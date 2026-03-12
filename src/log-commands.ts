@@ -93,6 +93,28 @@ function formatEntryLine(entry: LogEntry): string {
   return `${time} ${arrow} ${color}${method}${C.reset}${latency}${err}${hint}`;
 }
 
+// --- Public helpers ---
+
+export async function readLogEntriesForSession(sessionId?: string): Promise<LogEntry[] | null> {
+  const file = await findSessionFile(sessionId);
+  if (!file) return null;
+  return readLogEntries(file);
+}
+
+export async function readAllRecentSessions(maxSessions: number = 10): Promise<LogEntry[][]> {
+  const files = await getLogFiles();
+  const sessions: LogEntry[][] = [];
+  for (const file of files.slice(0, maxSessions)) {
+    try {
+      const entries = await readLogEntries(file);
+      if (entries.length > 0) sessions.push(entries);
+    } catch {
+      // Skip unreadable sessions
+    }
+  }
+  return sessions;
+}
+
 // --- Commands ---
 
 export async function listSessions(): Promise<void> {
