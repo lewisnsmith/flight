@@ -4,6 +4,8 @@ import { startProxy } from "./proxy.js";
 import { initClaude, initClaudeCode, getClaudeConfigPath, getClaudeCodeConfigPath } from "./init.js";
 import { listSessions, tailSession, viewSession, filterSessions, inspectCall, listAlerts, readLogEntriesForSession } from "./log-commands.js";
 import { computeSummary, formatSummary } from "./summary.js";
+import { entriesToCsv, entriesToJsonl } from "./export.js";
+import { writeFile as fsWriteFile } from "node:fs/promises";
 import { runSetup, runRemove } from "./setup.js";
 import { handleSessionStart, handleSessionEnd } from "./hooks.js";
 
@@ -156,6 +158,55 @@ log
     }
     const summary = computeSummary(entries);
     console.log(formatSummary(summary));
+  });
+
+// --- Export command ---
+
+program
+  .command("export")
+  .argument("[session]", "Session ID (default: most recent)")
+  .requiredOption("--format <format>", "Export format: csv or jsonl")
+  .option("--output <path>", "Output file path (default: stdout)")
+  .option("--include-payload", "Include full payload in export")
+  .option("--tool <name>", "Filter by tool name")
+  .option("--errors", "Include only entries with errors")
+  .option("--hallucinations", "Include only entries with hallucination hints")
+  .description("Export session logs to CSV or JSONL")
+  .action(async (session: string | undefined, options: { format: string; output?: string; includePayload?: boolean; tool?: string; errors?: boolean; hallucinations?: boolean }) => {
+    let entries = await readLogEntriesForSession(session);
+
+    if (!entries || entries.length === 0) {
+      console.error("No session data found.");
+      process.exit(1);
+    }
+
+    if (options.tool) {
+      const toolFilter = options.tool;
+      entries = entries.filter((e) => e.tool_name === toolFilter || e.method.includes(toolFilter));
+    }
+    if (options.errors) {
+      entries = entries.filter((e) => e.error);
+    }
+    if (options.hallucinations) {
+      entries = entries.filter((e) => e.hallucination_hint);
+    }
+
+    let output: string;
+    if (options.format === "csv") {
+      output = entriesToCsv(entries);
+    } else if (options.format === "jsonl") {
+      output = entriesToJsonl(entries, { includePayload: options.includePayload });
+    } else {
+      console.error(`Unknown format: ${options.format}. Supported: csv, jsonl`);
+      process.exit(1);
+    }
+
+    if (options.output) {
+      await fsWriteFile(options.output, output);
+      console.log(`Exported ${entries.length} entries to ${options.output}`);
+    } else {
+      process.stdout.write(output);
+    }
   });
 
 // --- Setup command ---
