@@ -179,7 +179,7 @@ print(f"Calls: {len(entries)}, Errors: {len(errors)}, Hallucination hints: {len(
 | `flight init claude` (config discovery) | ✅ | ✅ |
 | Secret redaction | ✅ | ✅ |
 | `flight log` CLI (list, tail, view, filter, inspect) | ✅ | ✅ |
-| Progressive disclosure (token optimization) | — | ✅ |
+| Progressive disclosure (experimental, token optimization) | — | ✅ |
 | Replay functionality | — | ✅ |
 | CSV/JSONL export | — | ✅ |
 | Token savings metrics | — | ✅ |

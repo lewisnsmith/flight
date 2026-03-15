@@ -95,6 +95,9 @@ export async function startProxy(options: ProxyOptions): Promise<void> {
   // Track pending retries: id → held error response (forwarded if retry also fails)
   const pendingRetries = new Map<string | number, JsonRpcMessage>();
 
+  // Track MCP protocol version from initialize handshake
+  let mcpProtocolVersion: string | undefined;
+
   // Client → Upstream: forward stdin and log
   const clientParser = parseJsonRpcStream(process.stdin);
   clientParser.on("message", (msg) => {
@@ -212,23 +215,50 @@ export async function startProxy(options: ProxyOptions): Promise<void> {
       }
     }
 
+    // Log MCP protocol version from initialize response
+    if (msg.result && !msg.error && msg.id != null) {
+      const originalRequest = pendingClientRequests.get(msg.id);
+      if (originalRequest?.method === "initialize" && msg.result) {
+        const result = msg.result as Record<string, unknown>;
+        if (result.protocolVersion) {
+          mcpProtocolVersion = String(result.protocolVersion);
+          if (!quiet) {
+            process.stderr.write(`[flight] MCP protocol version: ${mcpProtocolVersion}\n`);
+          }
+        }
+      }
+    }
+
     // PD: intercept tools/list responses to replace with meta-tools
     if (pdHandler && msg.result && !msg.error && msg.id != null) {
       const originalRequest = pendingClientRequests.get(msg.id);
       if (originalRequest?.method === "tools/list" && msg.result) {
-        const result = msg.result as Record<string, unknown>;
-        const tools = result.tools as ToolSchema[] | undefined;
-        if (tools && Array.isArray(tools)) {
-          pdHandler.loadSchemas(tools);
-          const rewritten = {
-            jsonrpc: "2.0",
-            id: msg.id,
-            result: { tools: pdHandler.getMetaToolSchemas() },
-          };
-          pendingClientRequests.delete(msg.id);
-          logger.log(rewritten as JsonRpcMessage, "server->client");
-          process.stdout.write(JSON.stringify(rewritten) + "\n");
-          return;
+        try {
+          const result = msg.result as Record<string, unknown>;
+          const tools = result.tools as ToolSchema[] | undefined;
+          if (tools && Array.isArray(tools)) {
+            pdHandler.loadSchemas(tools);
+            logger.pdActive = true;
+            const savings = pdHandler.estimateTokenSavings();
+            const rewritten = {
+              jsonrpc: "2.0",
+              id: msg.id,
+              result: { tools: pdHandler.getMetaToolSchemas() },
+            };
+            pendingClientRequests.delete(msg.id);
+            logger.log(rewritten as JsonRpcMessage, "server->client", {
+              pd_active: true,
+              schema_tokens_saved: savings.savedTokens,
+            });
+            process.stdout.write(JSON.stringify(rewritten) + "\n");
+            return;
+          }
+        } catch (err) {
+          // PD fallback: schema interception failed, drop to passthrough
+          if (!quiet) {
+            process.stderr.write(`[flight] Warning: PD schema interception failed, falling back to passthrough: ${err instanceof Error ? err.message : err}\n`);
+          }
+          logger.logError("pd-fallback", `Schema interception failed: ${err instanceof Error ? err.message : err}`);
         }
       }
     }

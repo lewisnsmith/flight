@@ -1,0 +1,364 @@
+# Flight Proxy Architecture
+
+This document describes the internal architecture of Flight Proxy, a local MCP
+flight recorder and token optimizer for AI coding agents.
+
+---
+
+## 1. System Overview
+
+```
+                          ~/.flight/logs/
+                          session_*.jsonl
+                               ^
+                               | async write queue
+                               | (NDJSON, 100ms flush)
+                               |
+ +--------------+         +----+----------+         +------------------+
+ |  MCP Client  |  stdin  |               |  stdin  |  Upstream MCP    |
+ |  (Claude     | ------> |  Flight Proxy | ------> |  Server          |
+ |   Code)      | <------ |               | <------ |  (filesystem,    |
+ |              |  stdout  |  - parse      |  stdout |   postgres, etc) |
+ +--------------+         |  - intercept  |         +------------------+
+                          |  - log        |              |
+                          |  - alert      |              | stderr
+                          +----+----------+              |
+                               |                         v
+                               |                  logger.logError()
+                               v
+                          ~/.flight/alerts.jsonl
+                          (hallucination, loop, error)
+```
+
+Flight sits as a transparent STDIO proxy between the MCP client and upstream
+server. It spawns the upstream process as a child, pipes stdin/stdout
+bidirectionally, and writes structured log entries to disk as a side effect.
+The proxy never modifies messages in passthrough mode; it only transforms
+traffic when progressive disclosure is enabled.
+
+---
+
+## 2. JSON-RPC Flow
+
+Messages are newline-delimited JSON-RPC 2.0 objects. The parser
+(`src/json-rpc.ts`) uses `readline` to split on newlines, then
+`JSON.parse` each line. Parse errors emit an `"error"` event rather
+than crashing the proxy.
+
+### Client-to-Server Path
+
+```
+process.stdin
+    |
+    v
+parseJsonRpcStream()          -- readline + JSON.parse per line
+    |
+    v
+"message" event
+    |
+    +---> [PD active?] ------> intercept discover_tools / execute_tool
+    |         |                  - discover_tools: respond locally, no upstream call
+    |         |                  - execute_tool: rewrite to real tools/call, forward
+    |         v
+    +---> logger.log(msg, "client->server")
+    |         |
+    |         +---> hallucination hint check (did client proceed after error?)
+    |         +---> loop detection (same tool+args 5x in 60s?)
+    |
+    +---> pendingClientRequests.set(id, msg)     -- track for latency + retry
+    |
+    v
+upstream.stdin.write(JSON.stringify(msg) + "\n")
+```
+
+### Server-to-Client Path
+
+```
+upstream.stdout
+    |
+    v
+parseJsonRpcStream()
+    |
+    v
+"message" event
+    |
+    +---> [pending retry?] --> if retry also failed, forward original error
+    |                         if retry succeeded, forward success
+    |
+    +---> [auto-retry?] ----> if read-only tool + transient error:
+    |         hold response, resend after 500ms, track in pendingRetries
+    |
+    +---> [PD active?] -----> intercept tools/list response:
+    |         cache real schemas, replace with 2 meta-tool schemas,
+    |         log token savings
+    |
+    +---> logger.log(msg, "server->client")
+    |         |
+    |         +---> compute latency (now - pendingRequests[id].timestamp)
+    |         +---> track in recentResponses (for hallucination detection)
+    |         +---> emit error alert if msg.error present
+    |
+    v
+process.stdout.write(JSON.stringify(msg) + "\n")
+```
+
+### Upstream stderr
+
+Captured via `upstream.stderr.on("data")`, logged as
+`logError("upstream-stderr", text)`, and forwarded to the proxy's own
+stderr when not in quiet mode.
+
+---
+
+## 3. Progressive Disclosure Algorithm
+
+> **Note:** Progressive Disclosure is experimental and off by default. The mechanism works but has not been validated with real AI client sessions.
+
+Progressive disclosure (PD) reduces token overhead by replacing N tool
+schemas with 2 meta-tools. It activates when `--pd` is passed to the
+proxy.
+
+### Activation Sequence
+
+```
+1. Client sends tools/list request
+2. Proxy forwards to upstream
+3. Upstream responds with { tools: [T1, T2, ..., Tn] }
+4. Proxy intercepts response:
+   a. Cache all N schemas in memory (Map<name, ToolSchema>)
+   b. Estimate token savings: ceil(JSON.stringify(allSchemas).length / 4)
+   c. Replace response with { tools: [discover_tools, execute_tool] }
+   d. Set logger.pdActive = true
+5. Client receives only 2 tool schemas instead of N
+```
+
+### Meta-Tool Schemas
+
+| Meta-Tool        | Purpose                                          |
+|------------------|--------------------------------------------------|
+| `discover_tools` | Search cached schemas by keyword (name + desc).  |
+|                  | Returns `[{ name, description }]`. No upstream   |
+|                  | call -- answered entirely from the in-memory      |
+|                  | schema cache.                                    |
+| `execute_tool`   | Proxy for real tool calls. Accepts `tool_name`   |
+|                  | and `arguments`. Validates the tool exists in    |
+|                  | the cache, rewrites the request to a real        |
+|                  | `tools/call`, and forwards to upstream.           |
+
+### Routing Logic (in proxy.ts)
+
+```
+Client calls tools/call with name="discover_tools"
+  --> pdHandler.discoverTools(query)
+  --> respond directly to client (no upstream round-trip)
+
+Client calls tools/call with name="execute_tool"
+  --> pdHandler.resolveExecuteTool(tool_name, arguments)
+  --> if tool not found: return JSON-RPC error -32602
+  --> if found: rewrite to { method: "tools/call", params: { name, arguments } }
+  --> forward rewritten request to upstream
+
+Any other tools/call
+  --> forward to upstream as normal
+```
+
+### Token Savings Estimation
+
+Estimated via character count divided by 4:
+`savedTokens = ceil(len(JSON(allSchemas)) / 4) - ceil(len(JSON(metaSchemas)) / 4)`
+
+Logged per-entry in the `schema_tokens_saved` field when PD rewrites occur.
+
+---
+
+## 4. Log Schema Reference
+
+Each line in a session `.jsonl` file is a `LogEntry`:
+
+| Field                 | Type                              | Description                                                  |
+|-----------------------|-----------------------------------|--------------------------------------------------------------|
+| `session_id`          | `string`                          | Unique session identifier (`session_YYYYMMDD_HHMMSS_<uuid>`) |
+| `call_id`             | `string`                          | JSON-RPC `id` (stringified) or random UUID for notifications |
+| `timestamp`           | `string` (ISO 8601)               | Wall-clock time of log entry                                 |
+| `latency_ms`          | `number`                          | Round-trip latency for responses (0 for requests)            |
+| `direction`           | `"client->server" \| "server->client"` | Which direction the message traveled                    |
+| `method`              | `string`                          | JSON-RPC method, or `"response"` for replies                 |
+| `tool_name`           | `string?`                         | Extracted tool name for `tools/call` messages                 |
+| `payload`             | `unknown`                         | Full JSON-RPC message (redacted if configured)               |
+| `error`               | `string?`                         | Error message if the response was an error                   |
+| `hallucination_hint`  | `boolean?`                        | True if client proceeded after error without retrying        |
+| `pd_active`           | `boolean`                         | Whether progressive disclosure was active                    |
+| `schema_tokens_saved` | `number?`                         | Estimated tokens saved by PD (on rewrite entries only)       |
+
+### Alert Entries (alerts.jsonl)
+
+Alerts are also appended to `~/.flight/alerts.jsonl`:
+
+| Field        | Type                                      | Description                       |
+|--------------|-------------------------------------------|-----------------------------------|
+| `timestamp`  | `string` (ISO 8601)                       | When the alert fired              |
+| `severity`   | `"error" \| "hallucination" \| "loop"`    | Alert classification              |
+| `method`     | `string`                                  | JSON-RPC method                   |
+| `tool_name`  | `string?`                                 | Tool name if applicable           |
+| `message`    | `string`                                  | Human-readable alert description  |
+| `session_id` | `string`                                  | Originating session               |
+| `call_id`    | `string`                                  | Originating call                  |
+
+---
+
+## 5. Alert System
+
+The proxy emits three types of real-time alerts, written to
+`~/.flight/alerts.jsonl` and optionally displayed on stderr.
+
+### Hallucination Hints
+
+**Trigger:** The client sends a `tools/call` request for tool B immediately
+after receiving an error response for tool A (different tool, within 30
+seconds). This pattern suggests the agent treated a failed call as successful.
+
+```
+server->client: tools/call/write_file ERROR
+client->server: tools/call/read_file        <-- hallucination hint
+                (different tool, no retry)
+```
+
+If the client retries the *same* tool, no hint is emitted -- that is
+legitimate error recovery.
+
+**Limitation:** This is a heuristic. It does not catch fabricated data in
+successful responses, incorrect arguments that happen to succeed, or
+reasoning hallucinations that bypass tool calls.
+
+### Loop Detection
+
+**Trigger:** The same tool is called with identical arguments 5 or more
+times within a 60-second window. Tracked via a hash of
+`toolName + JSON.stringify(arguments)`.
+
+The alert fires exactly once at the threshold (5th occurrence), not on
+every subsequent call.
+
+### Error Alerts
+
+**Trigger:** Any `server->client` response containing an `error` field.
+Every tool error is recorded as an alert for cross-session querying
+via `flight log alerts`.
+
+### Auto-Retry (Transparent)
+
+For read-only tools (`read_file`, `list_dir`, `search`, `get_*`, etc.)
+that fail with a transient error (not `-32601`, `-32602`, or `-32600`),
+the proxy automatically retries once after 500ms. The client never sees
+the initial failure if the retry succeeds. Both the original error and
+retry result are logged.
+
+---
+
+## 6. Log Lifecycle
+
+```
+Active session
+    |
+    v
+~/.flight/logs/session_*.jsonl       <-- append-only, NDJSON
+    |
+    | (after 24h default, or --compress-after)
+    v
+flight log gc --compress-after 24
+    |
+    v
+session_*.jsonl.gz                   <-- gzip compressed, original deleted
+    |
+    | (when count > --max-sessions or total > --max-bytes)
+    v
+Oldest sessions deleted (FIFO)
+```
+
+### Compression (`compressOldSessions`)
+
+- Scans `~/.flight/logs/` for `.jsonl` files with mtime older than threshold
+- Streams each through `zlib.createGzip()` to `.jsonl.gz`
+- Deletes the original `.jsonl` after successful compression
+
+### Garbage Collection (`garbageCollect`)
+
+- Default limits: 100 sessions max, 2 GB total
+- Sorts by mtime ascending (oldest first)
+- Deletes oldest files until both count and size are under limits
+- Supports `--dry-run` to preview without deleting
+
+### Pruning (`pruneSessions`)
+
+- `--before <date>`: delete sessions with mtime before the given date
+- `--keep <n>`: keep only the N most recent sessions, delete the rest
+- Both options can be combined
+
+### Per-Session Safety Limits
+
+| Limit            | Value   | Behavior on breach                         |
+|------------------|---------|--------------------------------------------|
+| Write queue depth| 1,000   | Drops entry with stderr warning            |
+| Session log size | 50 MB   | Disables logging for remainder of session  |
+| Disk space       | 100 MB  | Disables logging entirely at session start |
+
+---
+
+## 7. Key Design Decisions
+
+### Why STDIO (not HTTP)
+
+MCP's transport layer is STDIO-based: the client spawns a server process and
+communicates via stdin/stdout. Flight inserts itself into this pipe by being
+the command the client spawns, then spawning the real server as a child
+process. This requires zero network configuration, zero port management, and
+works identically across platforms. HTTP would add connection management,
+CORS, and port conflicts for no benefit in a local single-client scenario.
+
+### Why NDJSON
+
+Each log line is a self-contained JSON object terminated by `\n`. This
+format is:
+
+- **Append-only safe:** No need to maintain a valid JSON array wrapper.
+  A crash mid-write corrupts at most one line.
+- **Streamable:** `jq`, `grep`, `tail -f`, and Python's `readline()` all
+  work natively. No custom parser required for downstream analysis.
+- **Compressible:** gzip operates well on repetitive JSON text; `.jsonl.gz`
+  files are typically 10-20x smaller than raw.
+
+### Why async write queue with backpressure
+
+Log writes must never block the proxy's message forwarding path. The
+implementation uses:
+
+1. **In-memory queue** (`writeQueue: string[]`): entries are enqueued
+   synchronously during message handling.
+2. **Periodic flush** (`setInterval` at 100ms): batches all queued entries
+   into a single `appendFile` call, amortizing syscall overhead.
+3. **Backpressure cap** (1,000 entries): if the queue fills (disk I/O
+   stalled), new entries are dropped with a stderr warning rather than
+   growing memory unboundedly.
+4. **Size cap** (50 MB per session): prevents a runaway session from
+   filling disk.
+5. **Disk space check** (100 MB minimum): checked once at session start
+   via `statfs`. If disk is low, logging is disabled entirely -- the
+   proxy continues to function as a transparent pipe.
+
+This design ensures the proxy adds <5ms latency per message and never
+stalls or crashes due to I/O pressure.
+
+### Why fire-and-forget alerts
+
+Alert entries are written to `~/.flight/alerts.jsonl` via
+`appendFile(...).catch(() => {})`. Alert writes are intentionally
+best-effort: a failed alert write must never interrupt message proxying.
+Alerts are a secondary signal for cross-session triage, not a critical
+data path.
+
+### Why redirect console to stderr
+
+The proxy overrides `console.log`, `console.warn`, and `console.error` to
+write to `process.stderr` at startup. This prevents any diagnostic output
+from contaminating the stdout JSON-RPC stream between client and server,
+which would cause parse errors on both sides.

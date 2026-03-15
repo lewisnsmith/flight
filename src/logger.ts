@@ -31,11 +31,12 @@ export interface AlertEntry {
 }
 
 export interface SessionLogger {
-  log(msg: JsonRpcMessage, direction: "client->server" | "server->client"): void;
+  log(msg: JsonRpcMessage, direction: "client->server" | "server->client", extraFields?: Partial<Pick<LogEntry, "pd_active" | "schema_tokens_saved">>): void;
   logError(source: string, message: string): void;
   close(): Promise<void>;
   closeSync(): void;
   onAlert?: (alert: AlertEntry) => void;
+  pdActive: boolean;
   readonly sessionId: string;
   readonly logPath: string;
 }
@@ -233,8 +234,9 @@ export async function createSessionLogger(logDir?: string, redactionOptions?: Re
     sessionId,
     logPath,
     onAlert: undefined,
+    pdActive: false,
 
-    log(msg: JsonRpcMessage, direction: "client->server" | "server->client") {
+    log(msg: JsonRpcMessage, direction: "client->server" | "server->client", extraFields?: Partial<Pick<LogEntry, "pd_active" | "schema_tokens_saved">>) {
       const now = Date.now();
       const callId = (msg.id != null ? String(msg.id) : randomUUID());
       let latencyMs = 0;
@@ -307,7 +309,8 @@ export async function createSessionLogger(logDir?: string, redactionOptions?: Re
         payload: msg,
         error: msg.error?.message ?? (msg.error ? "(no message)" : undefined),
         hallucination_hint: hallucinationHint,
-        pd_active: false,
+        pd_active: extraFields?.pd_active ?? logger.pdActive,
+        schema_tokens_saved: extraFields?.schema_tokens_saved,
       };
 
       enqueue(redact(JSON.stringify(entry)));
@@ -351,7 +354,7 @@ export async function createSessionLogger(logDir?: string, redactionOptions?: Re
         method: source,
         payload: { error: message },
         error: message,
-        pd_active: false,
+        pd_active: logger.pdActive,
       };
       enqueue(redact(JSON.stringify(entry)));
     },

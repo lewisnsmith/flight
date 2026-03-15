@@ -8,3 +8,4 @@ export { entriesToCsv, entriesToJsonl } from "./export.js";
 export { compressOldSessions, garbageCollect, pruneSessions } from "./lifecycle.js";
 export { computeStats, formatStats, type SessionStats } from "./stats.js";
 export { createPDHandler, type PDHandler, type ToolSchema } from "./progressive-disclosure.js";
+export { findCallRequest, replayCall, type ReplayOptions, type ReplayResult } from "./replay.js";

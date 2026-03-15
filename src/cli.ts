@@ -10,6 +10,7 @@ import { runSetup, runRemove } from "./setup.js";
 import { handleSessionStart, handleSessionEnd } from "./hooks.js";
 import { compressOldSessions, garbageCollect, pruneSessions } from "./lifecycle.js";
 import { computeStats, computeAggregateStats, formatStats, formatAggregateStats } from "./stats.js";
+import { findCallRequest, replayCall } from "./replay.js";
 
 const require = createRequire(import.meta.url);
 const pkg = require("../package.json") as { version: string };
@@ -290,6 +291,66 @@ program
       }
       const aggregate = computeAggregateStats(sessions);
       console.log(formatAggregateStats(aggregate));
+    }
+  });
+
+// --- Replay command ---
+
+program
+  .command("replay")
+  .argument("<call-id>", "Call ID to replay (prefix match)")
+  .requiredOption("--cmd <command>", "Upstream MCP server command to replay against")
+  .option("--dry-run", "Show what would be sent without executing")
+  .option("--session <id>", "Session ID to search for the call")
+  .argument("[args...]", "Arguments to pass to upstream command")
+  .description("Re-execute a recorded tool call against an upstream MCP server")
+  .action(async (callId: string, args: string[], options: { cmd: string; dryRun?: boolean; session?: string }) => {
+    const entries = await readLogEntriesForSession(options.session);
+    if (!entries || entries.length === 0) {
+      console.error("No session data found.");
+      process.exit(1);
+    }
+
+    const entry = findCallRequest(entries, callId);
+    if (!entry) {
+      console.error(`Call not found: ${callId}`);
+      process.exit(1);
+    }
+
+    if (options.dryRun) {
+      console.log("\x1b[33m--- Dry Run ---\x1b[0m");
+      console.log(`\x1b[36mCommand:\x1b[0m  ${options.cmd} ${args.join(" ")}`);
+      console.log(`\x1b[36mMethod:\x1b[0m   ${entry.method}`);
+      if (entry.tool_name) console.log(`\x1b[36mTool:\x1b[0m     ${entry.tool_name}`);
+      console.log(`\x1b[36mCall ID:\x1b[0m  ${entry.call_id}`);
+      console.log();
+      console.log("\x1b[2m--- Request Payload ---\x1b[0m");
+      console.log(JSON.stringify(entry.payload, null, 2));
+      return;
+    }
+
+    console.log(`\x1b[36mReplaying:\x1b[0m ${entry.method}${entry.tool_name ? `/${entry.tool_name}` : ""}`);
+    console.log(`\x1b[36mAgainst:\x1b[0m   ${options.cmd} ${args.join(" ")}`);
+    console.log();
+
+    const result = await replayCall(entry, {
+      command: options.cmd,
+      args,
+    });
+
+    if (result.error) {
+      console.error(`\x1b[31mError:\x1b[0m ${result.error}`);
+      process.exit(1);
+    }
+
+    if (result.response) {
+      if (result.response.error) {
+        console.log(`\x1b[31mResult: ERROR\x1b[0m`);
+        console.log(JSON.stringify(result.response.error, null, 2));
+      } else {
+        console.log(`\x1b[32mResult: OK\x1b[0m`);
+        console.log(JSON.stringify(result.response.result, null, 2));
+      }
     }
   });
 
