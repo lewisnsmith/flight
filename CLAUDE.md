@@ -96,6 +96,14 @@ npm run bench
 Run `npm run check` before every commit to ensure lint, types, and tests all
 pass.
 
+```bash
+# Run a single test file
+npx vitest run test/logger.test.ts
+
+# Run tests matching a name pattern
+npx vitest run --reporter=verbose -t "hallucination"
+```
+
 ---
 
 ## Architecture and Key Design Decisions
@@ -113,9 +121,13 @@ MCP client  ←  proxy stdout ←  upstream server stdout
 Key behaviors:
 - **Pending request map**: tracks in-flight JSON-RPC requests to correlate
   responses for latency calculation.
-- **Auto-retry**: on error responses for read-only tools (names matching
-  `read_*`, `list_*`, `grep_*`, `get_*`), the proxy holds back the error and
-  retries once. Configurable via `ProxyOptions.retryReadOnlyTools`.
+- **Auto-retry**: on error responses for read-only tools, the proxy holds back
+  the error, waits 500 ms, and replays the original request once. Disable with
+  `ProxyOptions.noRetry = true`. Retryable tool set (`SAFE_RETRY_NAMES`):
+  `read_file`, `read`, `get_file_contents`, `list_dir`, `list_directory`, `ls`,
+  `search`, `grep`, `find_files`. Any tool whose name starts with `get_`
+  (`SAFE_RETRY_PREFIXES`) is also retryable. Permanent error codes
+  (`-32601`, `-32602`, `-32600`) are never retried.
 - **Backpressure-safe logging**: log writes are queued and never block the proxy
   pipe.
 - **Graceful shutdown**: listens for `SIGINT`/`SIGTERM` to drain the write queue
@@ -129,10 +141,11 @@ Important constants:
 | Constant | Value | Purpose |
 |---|---|---|
 | `MAX_QUEUE_DEPTH` | 1000 | Max buffered log entries before dropping |
-| `FLUSH_INTERVAL_MS` | 100 | Write-batch interval |
+| `FLUSH_INTERVAL_MS` | 100 ms | Write-batch interval |
 | `MIN_DISK_SPACE_BYTES` | 100 MB | Disable logging below this threshold |
-| `MAX_SESSION_BYTES` | 50 MB | Per-session log size cap |
-| `HALLUCINATION_WINDOW_MS` | 30 000 | Window for detecting error-then-proceed patterns |
+| `MAX_LOG_SIZE_BYTES` | 50 MB | Per-session log size cap |
+| `HALLUCINATION_WINDOW_MS` | 30 000 ms | Window for detecting error-then-proceed patterns |
+| `MAX_RECENT_RESPONSES` | 10 | Sliding window of responses checked for hallucinations |
 
 **Hallucination-hint detection**: when an agent receives a tool error and then
 sends another tool call (to a different tool) within 30 seconds without first
@@ -246,11 +259,17 @@ Session logs are newline-delimited JSON (JSONL). Each line is a `LogEntry`:
 
 ```jsonc
 {
-  "ts": "2024-01-15T10:23:45.123Z",  // ISO timestamp
-  "dir": "in" | "out",               // message direction relative to proxy
-  "msg": { /* JSON-RPC message */ }, // raw JSON-RPC object
-  "latencyMs": 42,                   // response latency (responses only)
-  "retried": true                    // present if auto-retry was triggered
+  "session_id": "session_20240115_102345_a1b2c3d4",
+  "call_id": "1",                              // request id, or UUID for notifications
+  "timestamp": "2024-01-15T10:23:45.123Z",
+  "latency_ms": 42,                            // 0 for client→server entries
+  "direction": "client->server",               // or "server->client"
+  "method": "tools/call",                      // JSON-RPC method; "response" for bare responses
+  "tool_name": "read_file",                    // present for tools/call messages
+  "payload": { /* raw JSON-RPC message */ },
+  "error": "file not found",                   // present when msg.error is set
+  "hallucination_hint": true,                  // present (true) when hint detected
+  "pd_active": false                           // pattern-detection flag (reserved, always false)
 }
 ```
 
@@ -258,12 +277,13 @@ Alert entries in `~/.flight/alerts.jsonl`:
 
 ```jsonc
 {
-  "ts": "2024-01-15T10:23:45.123Z",
-  "type": "hallucination_hint",
-  "sessionId": "session_1705315425123",
-  "failedTool": "read_file",
-  "nextTool": "write_file",
-  "gapMs": 1234
+  "timestamp": "2024-01-15T10:23:45.123Z",
+  "severity": "hallucination",               // "error" | "hallucination"
+  "method": "tools/call",
+  "tool_name": "read_file",                  // present for tool calls
+  "message": "Agent proceeded after error on read_file without retrying",
+  "session_id": "session_20240115_102345_a1b2c3d4",
+  "call_id": "3"
 }
 ```
 
@@ -280,8 +300,10 @@ Alert entries in `~/.flight/alerts.jsonl`:
 
 ### Modify retry logic
 
-Edit `src/proxy.ts` — look for `retryReadOnlyTools` and the `RETRYABLE_PREFIXES`
-constant. Update tests in `test/integration.test.ts`.
+Edit `src/proxy.ts` — look for `SAFE_RETRY_NAMES`, `SAFE_RETRY_PREFIXES`, and
+`PERMANENT_ERROR_CODES`. The retry delay is 500 ms (hardcoded `setTimeout`).
+Disable retries entirely via `ProxyOptions.noRetry`. Update tests in
+`test/integration.test.ts`.
 
 ### Add a new log entry type
 
