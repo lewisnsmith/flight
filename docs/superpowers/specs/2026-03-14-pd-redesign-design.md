@@ -46,7 +46,7 @@ PD operates in three phases, automatically selected based on accumulated usage h
 
 Applied in Phase 2 and 3. Modifies each tool's `inputSchema` in the intercepted `tools/list` response. Original schemas cached in memory.
 
-**Strip:**
+**Strip (recursively on all non-root schema nodes):**
 - `description` fields on individual properties (not the tool-level description)
 - `examples` / `default` values
 - `$comment` fields
@@ -115,7 +115,7 @@ Persists at `~/.flight/usage/` with one JSON file per upstream server.
 
 ```typescript
 interface UsageStore {
-  serverKey: string;           // hash of spawn command + args
+  serverKey: string;           // SHA-256 of `${command} ${args.join(" ")}` (trimmed, no trailing slashes)
   tools: Record<string, ToolUsage>;
   sessions: number;            // total sessions tracked
   lastUpdated: string;         // ISO timestamp
@@ -124,20 +124,26 @@ interface UsageStore {
 interface ToolUsage {
   name: string;
   callCount: number;           // total calls across all sessions
-  sessionCount: number;        // sessions where this tool was called
+  lastSessionUsed: number;     // session index when tool was last called (0-based)
   lastUsed: string;            // ISO timestamp
   errors: number;              // total error responses
 }
 ```
 
-**Filtering threshold:** A tool is hidden when `sessionCount === 0` across the last K sessions. Default K = 3.
+**Filtering threshold:** A tool is hidden when `sessions - lastSessionUsed >= K` (i.e., K consecutive sessions of non-use). Default K = 3. Tools not present in the usage store (new upstream tools) are always visible until they accumulate K sessions of non-use.
 
-**Phase detection:**
-- `sessions === 0` → Phase 1
-- `sessions >= 1` → Phase 2
-- `sessions >= K` (default 3) → Phase 3
+**Phase detection** uses separate thresholds — K controls filtering, not phase transitions:
+- `sessions === 0` → Phase 1 (observation)
+- `sessions >= 1` → Phase 2 (compression)
+- `sessions >= K` AND at least one tool meets the filtering threshold → Phase 3 (compression + filtering)
+
+Phase 3 only activates when there are actually tools to filter. If all tools are actively used, Phase 2 persists indefinitely.
+
+**Tool list evolution:** When upstream adds new tools not in the usage store, they are treated as visible (no history = no filtering). When upstream removes tools that are in the usage store, stale entries are pruned on the next session end write.
 
 **Updates:** Written once at session end during existing flush/cleanup. In-memory accumulator during the session.
+
+**Empty `discover_tools` query:** Returns all hidden tools (empty keyword list matches everything). This is intentional — allows the AI to browse all available tools.
 
 ### CLI Interface
 
@@ -151,6 +157,8 @@ flight proxy --cmd <command> [--pd] [--pd-history <n>] [args...]
 Phase selection is automatic. No manual phase override.
 
 ### Logging
+
+`schema_tokens_saved` is logged once per `tools/list` interception (as today), comparing original full schemas vs. the compressed/filtered response actually sent to the client. The stats command reads both log entries and the usage store file at `~/.flight/usage/`.
 
 Existing log entry fields preserved. New fields:
 
