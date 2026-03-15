@@ -97,20 +97,34 @@ export function createPDHandler(_cacheDir: string): PDHandler {
 
     discoverTools(query: string): DiscoverResult[] {
       const q = query.toLowerCase();
+      const keywords = q.split(/[\s_-]+/).filter(Boolean);
       const results: DiscoverResult[] = [];
 
       for (const tool of schemas.values()) {
-        const nameMatch = tool.name.toLowerCase().includes(q);
-        const descMatch = tool.description.toLowerCase().includes(q);
-        if (nameMatch || descMatch) {
+        const nameLower = tool.name.toLowerCase();
+        const descLower = tool.description.toLowerCase();
+
+        // Match if the full query appears as substring (with _ treated as space)
+        const nameNorm = nameLower.replace(/_/g, " ");
+        const descNorm = descLower.replace(/_/g, " ");
+        const fullMatch = nameNorm.includes(q) || descNorm.includes(q);
+
+        // Or if all keywords appear somewhere in name or description
+        const allKeywordsMatch = keywords.length > 0 && keywords.every(
+          (kw) => nameLower.includes(kw) || descLower.includes(kw),
+        );
+
+        if (fullMatch || allKeywordsMatch) {
           results.push({ name: tool.name, description: tool.description });
         }
       }
 
       // Sort: name matches first, then description matches
+      const allKeywordsInName = (name: string) =>
+        keywords.every((kw) => name.toLowerCase().includes(kw));
       results.sort((a, b) => {
-        const aName = a.name.toLowerCase().includes(q) ? 0 : 1;
-        const bName = b.name.toLowerCase().includes(q) ? 0 : 1;
+        const aName = allKeywordsInName(a.name) ? 0 : 1;
+        const bName = allKeywordsInName(b.name) ? 0 : 1;
         return aName - bName;
       });
 
