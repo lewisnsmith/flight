@@ -1,9 +1,9 @@
 import { describe, it, expect } from "vitest";
-import { join } from "node:path";
-import { tmpdir } from "node:os";
 import {
   createPDHandler,
+  compressSchema,
   type ToolSchema,
+  type UsageStore,
 } from "../src/progressive-disclosure.js";
 
 // Realistic tool schemas mimicking real MCP servers
@@ -146,78 +146,6 @@ const gitTools: ToolSchema[] = [
       required: ["repoPath"],
     },
   },
-  {
-    name: "git_commit",
-    description: "Record changes to the repository by creating a new commit with a message.",
-    inputSchema: {
-      type: "object",
-      properties: {
-        repoPath: { type: "string", description: "Path to the git repository root" },
-        message: { type: "string", description: "The commit message describing the changes" },
-        amend: { type: "boolean", description: "Amend the previous commit instead of creating a new one" },
-        author: { type: "string", description: "Override the commit author (format: Name <email>)" },
-      },
-      required: ["repoPath", "message"],
-    },
-  },
-  {
-    name: "git_branch",
-    description: "List, create, rename, or delete branches in the repository.",
-    inputSchema: {
-      type: "object",
-      properties: {
-        repoPath: { type: "string", description: "Path to the git repository root" },
-        name: { type: "string", description: "Branch name for create/delete operations" },
-        action: { type: "string", description: "Action to perform", enum: ["list", "create", "delete", "rename"] },
-        startPoint: { type: "string", description: "Starting point for the new branch (commit/branch/tag)" },
-        newName: { type: "string", description: "New name when renaming a branch" },
-      },
-      required: ["repoPath"],
-    },
-  },
-  {
-    name: "git_checkout",
-    description: "Switch branches or restore working tree files in the repository.",
-    inputSchema: {
-      type: "object",
-      properties: {
-        repoPath: { type: "string", description: "Path to the git repository root" },
-        ref: { type: "string", description: "Branch, tag, or commit to check out" },
-        createBranch: { type: "boolean", description: "Create a new branch and switch to it" },
-        paths: { type: "array", items: { type: "string" }, description: "Specific file paths to restore" },
-      },
-      required: ["repoPath", "ref"],
-    },
-  },
-  {
-    name: "git_stash",
-    description: "Stash changes in the working directory to a stack for later retrieval.",
-    inputSchema: {
-      type: "object",
-      properties: {
-        repoPath: { type: "string", description: "Path to the git repository root" },
-        action: { type: "string", description: "Stash action to perform", enum: ["push", "pop", "list", "drop", "apply"] },
-        message: { type: "string", description: "Message to describe the stash entry" },
-        includeUntracked: { type: "boolean", description: "Also stash untracked files" },
-      },
-      required: ["repoPath"],
-    },
-  },
-  {
-    name: "git_merge",
-    description: "Join two or more development histories together by merging branches.",
-    inputSchema: {
-      type: "object",
-      properties: {
-        repoPath: { type: "string", description: "Path to the git repository root" },
-        branch: { type: "string", description: "Branch to merge into the current branch" },
-        noFastForward: { type: "boolean", description: "Create a merge commit even if fast-forward is possible" },
-        squash: { type: "boolean", description: "Squash all commits into a single commit" },
-        message: { type: "string", description: "Custom merge commit message" },
-      },
-      required: ["repoPath", "branch"],
-    },
-  },
 ];
 
 const webTools: ToolSchema[] = [
@@ -266,339 +194,152 @@ const webTools: ToolSchema[] = [
       required: ["url"],
     },
   },
-  {
-    name: "web_search",
-    description: "Search the web using a search engine and return structured results with titles, URLs, and snippets.",
-    inputSchema: {
-      type: "object",
-      properties: {
-        query: { type: "string", description: "The search query string" },
-        maxResults: { type: "number", description: "Maximum number of results to return (default: 10)" },
-        language: { type: "string", description: "Language code for results (e.g., 'en', 'fr', 'de')" },
-        safeSearch: { type: "boolean", description: "Enable safe search filtering" },
-      },
-      required: ["query"],
-    },
-  },
-  {
-    name: "dns_lookup",
-    description: "Perform DNS lookups for a domain name, returning A, AAAA, CNAME, MX, and other record types.",
-    inputSchema: {
-      type: "object",
-      properties: {
-        domain: { type: "string", description: "The domain name to look up" },
-        recordType: { type: "string", description: "DNS record type to query", enum: ["A", "AAAA", "CNAME", "MX", "TXT", "NS", "SOA"] },
-        nameserver: { type: "string", description: "Custom DNS nameserver to use for the lookup" },
-      },
-      required: ["domain"],
-    },
-  },
 ];
 
-const databaseTools: ToolSchema[] = [
-  {
-    name: "db_query",
-    description: "Execute a read-only SQL query against a database and return the result rows as JSON.",
-    inputSchema: {
-      type: "object",
-      properties: {
-        connectionString: { type: "string", description: "Database connection string (postgres://, mysql://, sqlite://)" },
-        query: { type: "string", description: "The SQL query to execute" },
-        params: { type: "array", items: { type: "string" }, description: "Parameterized query values to prevent SQL injection" },
-        maxRows: { type: "number", description: "Maximum number of rows to return (default: 1000)" },
-        timeout: { type: "number", description: "Query timeout in milliseconds" },
-      },
-      required: ["connectionString", "query"],
-    },
-  },
-  {
-    name: "db_execute",
-    description: "Execute a write SQL statement (INSERT, UPDATE, DELETE) and return the number of affected rows.",
-    inputSchema: {
-      type: "object",
-      properties: {
-        connectionString: { type: "string", description: "Database connection string" },
-        statement: { type: "string", description: "The SQL statement to execute" },
-        params: { type: "array", items: { type: "string" }, description: "Parameterized values for the statement" },
-        timeout: { type: "number", description: "Statement timeout in milliseconds" },
-      },
-      required: ["connectionString", "statement"],
-    },
-  },
-  {
-    name: "db_schema",
-    description: "Retrieve the database schema including tables, columns, types, constraints, and indexes.",
-    inputSchema: {
-      type: "object",
-      properties: {
-        connectionString: { type: "string", description: "Database connection string" },
-        table: { type: "string", description: "Specific table name to get schema for (omit for all tables)" },
-        includeIndexes: { type: "boolean", description: "Whether to include index information" },
-        includeConstraints: { type: "boolean", description: "Whether to include constraint details (foreign keys, unique, etc.)" },
-      },
-      required: ["connectionString"],
-    },
-  },
-];
-
-const dockerTools: ToolSchema[] = [
-  {
-    name: "docker_ps",
-    description: "List running Docker containers with their IDs, names, images, ports, and status.",
-    inputSchema: {
-      type: "object",
-      properties: {
-        all: { type: "boolean", description: "Show all containers, including stopped ones" },
-        filter: { type: "string", description: "Filter containers by label, status, or name" },
-        format: { type: "string", description: "Output format", enum: ["table", "json"] },
-      },
-      required: [],
-    },
-  },
-  {
-    name: "docker_logs",
-    description: "Fetch the logs of a running or stopped Docker container.",
-    inputSchema: {
-      type: "object",
-      properties: {
-        container: { type: "string", description: "Container ID or name" },
-        tail: { type: "number", description: "Number of lines to show from the end" },
-        since: { type: "string", description: "Show logs since timestamp (ISO 8601 or relative like '5m')" },
-        follow: { type: "boolean", description: "Stream logs in real-time" },
-        timestamps: { type: "boolean", description: "Show timestamps for each log line" },
-      },
-      required: ["container"],
-    },
-  },
-  {
-    name: "docker_exec",
-    description: "Execute a command inside a running Docker container and return its output.",
-    inputSchema: {
-      type: "object",
-      properties: {
-        container: { type: "string", description: "Container ID or name" },
-        command: { type: "string", description: "Command to execute inside the container" },
-        workdir: { type: "string", description: "Working directory inside the container" },
-        user: { type: "string", description: "User to run the command as" },
-        env: { type: "object", description: "Environment variables to set for the command" },
-      },
-      required: ["container", "command"],
-    },
-  },
-  {
-    name: "docker_build",
-    description: "Build a Docker image from a Dockerfile in the specified context directory.",
-    inputSchema: {
-      type: "object",
-      properties: {
-        contextPath: { type: "string", description: "Path to the build context directory" },
-        dockerfile: { type: "string", description: "Path to the Dockerfile (default: contextPath/Dockerfile)" },
-        tag: { type: "string", description: "Tag for the built image (e.g., myapp:latest)" },
-        buildArgs: { type: "object", description: "Build-time variables passed to the Dockerfile" },
-        noCache: { type: "boolean", description: "Do not use cache when building the image" },
-        target: { type: "string", description: "Target build stage for multi-stage builds" },
-      },
-      required: ["contextPath"],
-    },
-  },
-  {
-    name: "docker_run",
-    description: "Create and start a new Docker container from an image with specified configuration.",
-    inputSchema: {
-      type: "object",
-      properties: {
-        image: { type: "string", description: "Docker image to run (e.g., nginx:latest)" },
-        name: { type: "string", description: "Name to assign to the container" },
-        ports: { type: "array", items: { type: "string" }, description: "Port mappings (e.g., ['8080:80', '443:443'])" },
-        env: { type: "object", description: "Environment variables to set inside the container" },
-        volumes: { type: "array", items: { type: "string" }, description: "Volume mounts (e.g., ['/host/path:/container/path'])" },
-        detach: { type: "boolean", description: "Run container in background and return container ID" },
-        network: { type: "string", description: "Docker network to connect the container to" },
-      },
-      required: ["image"],
-    },
-  },
-];
-
-const kubernetesTools: ToolSchema[] = [
-  {
-    name: "kubectl_get",
-    description: "Get Kubernetes resources of a specified type, with optional label and field selectors.",
-    inputSchema: {
-      type: "object",
-      properties: {
-        resource: { type: "string", description: "Resource type (pods, services, deployments, etc.)" },
-        namespace: { type: "string", description: "Kubernetes namespace (default: current context namespace)" },
-        name: { type: "string", description: "Specific resource name to get" },
-        labelSelector: { type: "string", description: "Label selector to filter resources (e.g., 'app=nginx')" },
-        output: { type: "string", description: "Output format", enum: ["json", "yaml", "wide", "name"] },
-      },
-      required: ["resource"],
-    },
-  },
-  {
-    name: "kubectl_apply",
-    description: "Apply a Kubernetes manifest to create or update resources in the cluster.",
-    inputSchema: {
-      type: "object",
-      properties: {
-        manifest: { type: "string", description: "YAML or JSON manifest content to apply" },
-        namespace: { type: "string", description: "Target namespace for the resources" },
-        dryRun: { type: "boolean", description: "Only print what would be applied without making changes" },
-        force: { type: "boolean", description: "Force apply even if there are conflicts" },
-      },
-      required: ["manifest"],
-    },
-  },
-  {
-    name: "kubectl_logs",
-    description: "Fetch logs from a Kubernetes pod, optionally from a specific container.",
-    inputSchema: {
-      type: "object",
-      properties: {
-        pod: { type: "string", description: "Pod name to get logs from" },
-        namespace: { type: "string", description: "Kubernetes namespace of the pod" },
-        container: { type: "string", description: "Specific container name within the pod" },
-        tail: { type: "number", description: "Number of lines from the end to show" },
-        since: { type: "string", description: "Show logs since a relative duration (e.g., '5m', '1h')" },
-        previous: { type: "boolean", description: "Show logs from the previously terminated container" },
-      },
-      required: ["pod"],
-    },
-  },
-  {
-    name: "kubectl_describe",
-    description: "Show detailed information about a specific Kubernetes resource including events and conditions.",
-    inputSchema: {
-      type: "object",
-      properties: {
-        resource: { type: "string", description: "Resource type (pod, service, deployment, etc.)" },
-        name: { type: "string", description: "Name of the resource to describe" },
-        namespace: { type: "string", description: "Kubernetes namespace of the resource" },
-      },
-      required: ["resource", "name"],
-    },
-  },
-  {
-    name: "kubectl_scale",
-    description: "Scale a Kubernetes deployment, replica set, or stateful set to a specified number of replicas.",
-    inputSchema: {
-      type: "object",
-      properties: {
-        resource: { type: "string", description: "Resource type (deployment, replicaset, statefulset)" },
-        name: { type: "string", description: "Name of the resource to scale" },
-        replicas: { type: "number", description: "Desired number of replicas" },
-        namespace: { type: "string", description: "Kubernetes namespace of the resource" },
-        timeout: { type: "string", description: "Timeout for the scaling operation (e.g., '60s')" },
-      },
-      required: ["resource", "name", "replicas"],
-    },
-  },
-];
-
-// Helper to combine tool groups up to a target count
 function buildToolSet(count: number): ToolSchema[] {
-  const allTools = [
-    ...filesystemTools,
-    ...gitTools,
-    ...webTools,
-    ...databaseTools,
-    ...dockerTools,
-    ...kubernetesTools,
-  ];
-
+  const allTools = [...filesystemTools, ...gitTools, ...webTools];
   const result: ToolSchema[] = [];
   for (let i = 0; i < count; i++) {
-    // Cycle through the realistic tools, adding unique suffixes if we exceed the pool
     const base = allTools[i % allTools.length];
     if (i < allTools.length) {
       result.push(base);
     } else {
-      result.push({
-        ...base,
-        name: `${base.name}_${Math.floor(i / allTools.length)}`,
-      });
+      result.push({ ...base, name: `${base.name}_${Math.floor(i / allTools.length)}` });
     }
   }
   return result;
 }
 
-describe("Progressive Disclosure Token Reduction", () => {
-  it("1 tool: savings are minimal or negative (meta-tools overhead)", () => {
-    const pd = createPDHandler(join(tmpdir(), "pd-token-1"));
-    pd.loadSchemas(buildToolSet(1));
-
-    const savings = pd.estimateTokenSavings();
-    const ratio = savings.originalTokens / savings.reducedTokens;
-
-    // With only 1 tool, the 2 meta-tool schemas are likely larger than the
-    // single original tool schema, so the ratio should be < 2 (possibly < 1).
-    expect(ratio).toBeLessThan(2);
+function makePhase2Handler(tools: ToolSchema[]) {
+  const store: UsageStore = {
+    serverKey: "test",
+    tools: {},
+    sessions: 1,
+    lastUpdated: "2026-01-01",
+  };
+  const pd = createPDHandler({
+    serverCommand: "test-server",
+    serverArgs: [],
+    historyThreshold: 3,
+    usageStore: store,
   });
+  pd.loadSchemas(tools);
+  return pd;
+}
 
-  it("10 tools: achieves at least 10x token reduction", () => {
-    const pd = createPDHandler(join(tmpdir(), "pd-token-10"));
-    const tools = buildToolSet(10);
-    pd.loadSchemas(tools);
-
+describe("Progressive Disclosure Token Reduction (Compression)", () => {
+  it("Phase 2 compression achieves >30% schema reduction on 10 realistic tools", () => {
+    const pd = makePhase2Handler(buildToolSet(10));
     const savings = pd.estimateTokenSavings();
-    const ratio = savings.originalTokens / savings.reducedTokens;
 
     expect(savings.originalTokens).toBeGreaterThan(0);
-    expect(savings.reducedTokens).toBeGreaterThan(0);
     expect(savings.savedTokens).toBeGreaterThan(0);
-    // 10 tools yields ~6-7x reduction (meta-tool overhead is significant at low counts)
-    expect(ratio).toBeGreaterThanOrEqual(5);
+
+    const reductionPct = (savings.savedTokens / savings.originalTokens) * 100;
+    // Spec requires >30% reduction
+    expect(reductionPct).toBeGreaterThanOrEqual(30);
   });
 
-  it("30 tools: achieves significantly higher reduction than 10 tools", () => {
-    const pd10 = createPDHandler(join(tmpdir(), "pd-token-10b"));
-    pd10.loadSchemas(buildToolSet(10));
-    const savings10 = pd10.estimateTokenSavings();
-    const ratio10 = savings10.originalTokens / savings10.reducedTokens;
+  it("compression scales with number of tools (more tools = more absolute savings)", () => {
+    const counts = [5, 10, 15, 20];
+    const savedTokens: number[] = [];
 
-    const pd30 = createPDHandler(join(tmpdir(), "pd-token-30"));
-    pd30.loadSchemas(buildToolSet(30));
-    const savings30 = pd30.estimateTokenSavings();
-    const ratio30 = savings30.originalTokens / savings30.reducedTokens;
+    for (const count of counts) {
+      const pd = makePhase2Handler(buildToolSet(count));
+      savedTokens.push(pd.estimateTokenSavings().savedTokens);
+    }
 
-    expect(ratio30).toBeGreaterThan(ratio10);
-    // 30 tools should achieve significantly higher ratio than 10 tools
-    // (meta-tool size is fixed while original grows linearly)
-    expect(ratio30).toBeGreaterThanOrEqual(15);
+    // More tools should save more tokens
+    for (let i = 1; i < savedTokens.length; i++) {
+      expect(savedTokens[i]).toBeGreaterThan(savedTokens[i - 1]);
+    }
   });
 
-  it("50 tools: achieves the claimed 10-50x reduction range", () => {
-    const pd = createPDHandler(join(tmpdir(), "pd-token-50"));
-    const tools = buildToolSet(50);
-    pd.loadSchemas(tools);
-
-    const savings = pd.estimateTokenSavings();
-    const ratio = savings.originalTokens / savings.reducedTokens;
-
-    // With 50 realistic tools, the ratio should comfortably land in 10-50x
-    expect(ratio).toBeGreaterThanOrEqual(10);
-    expect(ratio).toBeLessThanOrEqual(100); // generous upper bound
-
-    // Verify the absolute numbers make sense
-    expect(savings.originalTokens).toBeGreaterThan(savings.reducedTokens);
-    expect(savings.savedTokens).toBe(savings.originalTokens - savings.reducedTokens);
-  });
-
-  it("token reduction scales linearly with tool count", () => {
-    const counts = [10, 20, 30, 40, 50];
+  it("compression ratio stays consistent regardless of tool count", () => {
+    const counts = [5, 10, 20];
     const ratios: number[] = [];
 
     for (const count of counts) {
-      const pd = createPDHandler(join(tmpdir(), `pd-token-${count}`));
-      pd.loadSchemas(buildToolSet(count));
+      const pd = makePhase2Handler(buildToolSet(count));
       const savings = pd.estimateTokenSavings();
-      ratios.push(savings.originalTokens / savings.reducedTokens);
+      ratios.push(savings.savedTokens / savings.originalTokens);
     }
 
-    // Each step should increase the ratio (since original grows, reduced stays fixed)
-    for (let i = 1; i < ratios.length; i++) {
-      expect(ratios[i]).toBeGreaterThan(ratios[i - 1]);
+    // Compression ratio should be roughly similar (within 10% of each other)
+    const minRatio = Math.min(...ratios);
+    const maxRatio = Math.max(...ratios);
+    expect(maxRatio - minRatio).toBeLessThan(0.15);
+  });
+
+  it("Phase 3 filtering adds additional savings beyond compression", () => {
+    const tools = buildToolSet(10);
+
+    // Phase 2: compression only
+    const pd2 = makePhase2Handler(tools);
+    const savings2 = pd2.estimateTokenSavings();
+
+    // Phase 3: compression + filtering (hide 3 tools)
+    const store3: UsageStore = {
+      serverKey: "test",
+      tools: {},
+      sessions: 5,
+      lastUpdated: "2026-01-05",
+    };
+    // Only mark first 7 tools as recently used, last 3 as stale
+    for (let i = 0; i < tools.length; i++) {
+      store3.tools[tools[i].name] = {
+        name: tools[i].name,
+        callCount: i < 7 ? 10 : 1,
+        lastSessionUsed: i < 7 ? 4 : 0,
+        lastUsed: i < 7 ? "2026-01-05" : "2026-01-01",
+        errors: 0,
+      };
     }
+    const pd3 = createPDHandler({
+      serverCommand: "test-server",
+      serverArgs: [],
+      historyThreshold: 3,
+      usageStore: store3,
+    });
+    pd3.loadSchemas(tools);
+
+    expect(pd3.getPhase()).toBe(3);
+    const savings3 = pd3.estimateTokenSavings();
+    expect(savings3.savedTokens).toBeGreaterThan(savings2.savedTokens);
+  });
+
+  it("individual schema compression matches spec example", () => {
+    // Spec example: 388 chars → 150 chars
+    const original: Record<string, unknown> = {
+      type: "object",
+      properties: {
+        path: {
+          type: "string",
+          description: "The absolute file path to read from the filesystem",
+        },
+        encoding: {
+          type: "string",
+          description: "The file encoding to use when reading",
+          default: "utf-8",
+          enum: ["utf-8", "ascii", "base64"],
+        },
+      },
+      required: ["path"],
+    };
+
+    const compressed = compressSchema(original);
+    const compressedStr = JSON.stringify(compressed);
+
+    // Property descriptions and defaults stripped
+    expect(compressedStr).not.toContain("The absolute file path");
+    expect(compressedStr).not.toContain("The file encoding");
+    // Enum preserved
+    expect(compressedStr).toContain("utf-8");
+    expect(compressedStr).toContain("ascii");
+    expect(compressedStr).toContain("base64");
+    // Required preserved
+    expect(compressed.required).toEqual(["path"]);
+    // Type preserved
+    expect(compressed.type).toBe("object");
   });
 });

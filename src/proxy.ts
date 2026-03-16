@@ -1,9 +1,8 @@
-import { spawn, type ChildProcess } from "node:child_process";
-import { join } from "node:path";
-import { homedir } from "node:os";
+import { spawn } from "node:child_process";
 import { parseJsonRpcStream, type JsonRpcMessage } from "./json-rpc.js";
 import { createSessionLogger, type AlertEntry } from "./logger.js";
-import { createPDHandler, type PDHandler, type ToolSchema } from "./progressive-disclosure.js";
+import { createPDHandlerWithHistory, type PDHandler } from "./progressive-disclosure.js";
+import { createRetryManager } from "./retry.js";
 
 export interface ProxyOptions {
   command: string;
@@ -12,36 +11,7 @@ export interface ProxyOptions {
   quiet?: boolean;
   noRetry?: boolean;
   pd?: boolean;
-}
-
-// Read-only tool names safe to auto-retry on error
-const SAFE_RETRY_NAMES = new Set([
-  "read_file", "read", "get_file_contents",
-  "list_dir", "list_directory", "ls",
-  "search", "grep", "find_files",
-]);
-
-const SAFE_RETRY_PREFIXES = ["get_"];
-
-// Permanent error codes that should never be retried
-const PERMANENT_ERROR_CODES = new Set([-32601, -32602, -32600]);
-
-function isReadOnlyTool(toolName: string | undefined): boolean {
-  if (!toolName) return false;
-  if (SAFE_RETRY_NAMES.has(toolName)) return true;
-  return SAFE_RETRY_PREFIXES.some((p) => toolName.startsWith(p));
-}
-
-function isPermanentError(msg: JsonRpcMessage): boolean {
-  if (!msg.error) return false;
-  return PERMANENT_ERROR_CODES.has(msg.error.code);
-}
-
-function getToolNameFromRequest(msg: JsonRpcMessage): string | undefined {
-  if (msg.method === "tools/call" && msg.params && typeof msg.params === "object") {
-    return (msg.params as Record<string, unknown>).name as string | undefined;
-  }
-  return undefined;
+  pdHistory?: number;
 }
 
 export async function startProxy(options: ProxyOptions): Promise<void> {
@@ -51,7 +21,6 @@ export async function startProxy(options: ProxyOptions): Promise<void> {
   console.error = (...args: unknown[]) => { process.stderr.write(args.map(String).join(" ") + "\n"); };
 
   const quiet = options.quiet ?? !process.stdin.isTTY;
-  const retryEnabled = !options.noRetry;
 
   const logger = await createSessionLogger(options.logDir);
 
@@ -78,11 +47,14 @@ export async function startProxy(options: ProxyOptions): Promise<void> {
   let pdHandler: PDHandler | null = null;
 
   if (pdEnabled) {
-    const cacheDir = join(homedir(), ".flight", "schemas");
-    pdHandler = createPDHandler(cacheDir);
+    pdHandler = await createPDHandlerWithHistory(
+      options.command,
+      options.args,
+      options.pdHistory ?? 3,
+    );
   }
 
-  const upstream: ChildProcess = spawn(options.command, options.args, {
+  const upstream = spawn(options.command, options.args, {
     stdio: ["pipe", "pipe", "pipe"],
   });
 
@@ -90,10 +62,7 @@ export async function startProxy(options: ProxyOptions): Promise<void> {
     throw new Error("Failed to open stdio pipes to upstream process");
   }
 
-  // Track pending client requests for retry logic
-  const pendingClientRequests = new Map<string | number, JsonRpcMessage>();
-  // Track pending retries: id → held error response (forwarded if retry also fails)
-  const pendingRetries = new Map<string | number, JsonRpcMessage>();
+  const retry = createRetryManager(!options.noRetry);
 
   // Track MCP protocol version from initialize handshake
   let mcpProtocolVersion: string | undefined;
@@ -101,7 +70,7 @@ export async function startProxy(options: ProxyOptions): Promise<void> {
   // Client → Upstream: forward stdin and log
   const clientParser = parseJsonRpcStream(process.stdin);
   clientParser.on("message", (msg) => {
-    // PD: intercept discover_tools and execute_tool calls
+    // PD: intercept discover_tools calls (Phase 3 local handler)
     if (pdHandler && pdHandler.isActive() && msg.method === "tools/call" && msg.params) {
       const params = msg.params as Record<string, unknown>;
       const toolName = params.name as string;
@@ -122,45 +91,10 @@ export async function startProxy(options: ProxyOptions): Promise<void> {
         process.stdout.write(JSON.stringify(response) + "\n");
         return;
       }
-
-      if (toolName === "execute_tool") {
-        const args = params.arguments as Record<string, unknown>;
-        const realToolName = args?.tool_name as string;
-        const realArgs = (args?.arguments ?? {}) as Record<string, unknown>;
-        const resolved = pdHandler.resolveExecuteTool(realToolName, realArgs);
-
-        if (!resolved) {
-          const errResponse = {
-            jsonrpc: "2.0",
-            id: msg.id,
-            error: { code: -32602, message: `Unknown tool: ${realToolName}. Use discover_tools to find available tools.` },
-          };
-          logger.log(msg, "client->server");
-          logger.log(errResponse as JsonRpcMessage, "server->client");
-          process.stdout.write(JSON.stringify(errResponse) + "\n");
-          return;
-        }
-
-        // Rewrite to real tools/call
-        const realRequest: JsonRpcMessage = {
-          jsonrpc: "2.0",
-          id: msg.id,
-          method: "tools/call",
-          params: { name: resolved.toolName, arguments: resolved.arguments },
-        };
-        logger.log(msg, "client->server");
-        if (retryEnabled && msg.id != null) {
-          pendingClientRequests.set(msg.id, realRequest);
-        }
-        upstream.stdin!.write(JSON.stringify(realRequest) + "\n");
-        return;
-      }
     }
 
     logger.log(msg, "client->server");
-    if (retryEnabled && msg.id != null) {
-      pendingClientRequests.set(msg.id, msg);
-    }
+    retry.trackRequest(msg);
     upstream.stdin!.write(JSON.stringify(msg) + "\n");
   });
   clientParser.on("error", (err) => {
@@ -170,54 +104,27 @@ export async function startProxy(options: ProxyOptions): Promise<void> {
   // Upstream → Client: forward stdout and log
   const upstreamParser = parseJsonRpcStream(upstream.stdout);
   upstreamParser.on("message", (msg) => {
-    // Check if this is a response to a pending retry
-    if (msg.id != null && pendingRetries.has(msg.id)) {
-      const heldError = pendingRetries.get(msg.id)!;
-      pendingRetries.delete(msg.id);
-      logger.log(msg, "server->client");
-
-      if (msg.error) {
-        // Retry also failed — forward original error to client
-        process.stdout.write(JSON.stringify(heldError) + "\n");
+    // --- Retry handling ---
+    const retryResult = retry.handleResponse(msg, (req) => {
+      if (!upstream.killed && upstream.stdin && !upstream.stdin.destroyed) {
+        upstream.stdin.write(JSON.stringify(req) + "\n");
       } else {
-        // Retry succeeded — forward success to client
-        process.stdout.write(JSON.stringify(msg) + "\n");
+        // Upstream gone — forward held error immediately
+        // (drain() will catch any remaining on close)
+      }
+    });
+
+    if (retryResult.handled) {
+      logger.log(msg, "server->client");
+      if (retryResult.forward) {
+        process.stdout.write(JSON.stringify(retryResult.forward) + "\n");
       }
       return;
     }
 
-    // Check if we should auto-retry this failed response
-    if (retryEnabled && msg.error && msg.id != null && !isPermanentError(msg)) {
-      const originalRequest = pendingClientRequests.get(msg.id);
-      if (originalRequest) {
-        const toolName = getToolNameFromRequest(originalRequest);
-        if (originalRequest.method === "tools/call" && isReadOnlyTool(toolName)) {
-          // Log the initial error but hold the response
-          logger.log(msg, "server->client");
-          pendingClientRequests.delete(msg.id);
-          pendingRetries.set(msg.id, msg);
-
-          // Retry after 500ms
-          setTimeout(() => {
-            if (!upstream.killed && upstream.stdin && !upstream.stdin.destroyed) {
-              upstream.stdin.write(JSON.stringify(originalRequest) + "\n");
-            } else {
-              // Upstream gone — forward held error to client
-              const held = pendingRetries.get(originalRequest.id!);
-              if (held) {
-                pendingRetries.delete(originalRequest.id!);
-                process.stdout.write(JSON.stringify(held) + "\n");
-              }
-            }
-          }, 500);
-          return;
-        }
-      }
-    }
-
-    // Log MCP protocol version from initialize response
+    // --- Protocol version tracking ---
     if (msg.result && !msg.error && msg.id != null) {
-      const originalRequest = pendingClientRequests.get(msg.id);
+      const originalRequest = retry.getOriginalRequest(msg.id);
       if (originalRequest?.method === "initialize" && msg.result) {
         const result = msg.result as Record<string, unknown>;
         if (result.protocolVersion) {
@@ -229,42 +136,43 @@ export async function startProxy(options: ProxyOptions): Promise<void> {
       }
     }
 
-    // PD: intercept tools/list responses to replace with meta-tools
-    if (pdHandler && msg.result && !msg.error && msg.id != null) {
-      const originalRequest = pendingClientRequests.get(msg.id);
-      if (originalRequest?.method === "tools/list" && msg.result) {
-        try {
-          const result = msg.result as Record<string, unknown>;
-          const tools = result.tools as ToolSchema[] | undefined;
-          if (tools && Array.isArray(tools)) {
-            pdHandler.loadSchemas(tools);
-            logger.pdActive = true;
-            const savings = pdHandler.estimateTokenSavings();
-            const rewritten = {
-              jsonrpc: "2.0",
-              id: msg.id,
-              result: { tools: pdHandler.getMetaToolSchemas() },
-            };
-            pendingClientRequests.delete(msg.id);
-            logger.log(rewritten as JsonRpcMessage, "server->client", {
-              pd_active: true,
-              schema_tokens_saved: savings.savedTokens,
-            });
-            process.stdout.write(JSON.stringify(rewritten) + "\n");
-            return;
-          }
-        } catch (err) {
-          // PD fallback: schema interception failed, drop to passthrough
-          if (!quiet) {
-            process.stderr.write(`[flight] Warning: PD schema interception failed, falling back to passthrough: ${err instanceof Error ? err.message : err}\n`);
-          }
-          logger.logError("pd-fallback", `Schema interception failed: ${err instanceof Error ? err.message : err}`);
+    // --- Progressive disclosure response processing ---
+    if (pdHandler && msg.id != null) {
+      const originalRequest = retry.getOriginalRequest(msg.id);
+      const pdResult = pdHandler.processResponse(originalRequest, msg);
+
+      if (pdResult.error) {
+        if (!quiet) {
+          process.stderr.write(`[flight] Warning: PD falling back to passthrough: ${pdResult.error}\n`);
         }
+        logger.logError("pd-fallback", pdResult.error);
+        // Fall through to normal flow
+      } else if (pdResult.rewrittenResponse) {
+        logger.pdActive = true;
+        retry.clearRequest(msg.id);
+        logger.log(pdResult.rewrittenResponse, "server->client", pdResult.logMeta ? {
+          pd_active: pdResult.logMeta.pd_active,
+          schema_tokens_saved: pdResult.logMeta.schema_tokens_saved,
+          pd_phase: pdResult.logMeta.pd_phase,
+        } : undefined);
+
+        if (!quiet && pdResult.statusMessage) {
+          process.stderr.write(`[flight] ${pdResult.statusMessage}\n`);
+        }
+
+        process.stdout.write(JSON.stringify(pdResult.rewrittenResponse) + "\n");
+        return;
+      } else if (pdResult.toolHidden) {
+        // Tool was hidden — annotate in log but continue normal flow
+        retry.clearRequest(msg.id);
+        logger.log(msg, "server->client", { pd_tool_hidden: true });
+        process.stdout.write(JSON.stringify(msg) + "\n");
+        return;
       }
     }
 
-    // Normal flow
-    if (msg.id != null) pendingClientRequests.delete(msg.id);
+    // --- Normal flow ---
+    if (msg.id != null) retry.clearRequest(msg.id);
     logger.log(msg, "server->client");
     process.stdout.write(JSON.stringify(msg) + "\n");
   });
@@ -285,19 +193,27 @@ export async function startProxy(options: ProxyOptions): Promise<void> {
 
   // Handle upstream exit
   upstream.on("close", async (code) => {
-    // Flush held error responses for any pending retries
-    for (const heldError of pendingRetries.values()) {
+    // Flush PD usage data
+    if (pdHandler) {
+      try {
+        await pdHandler.flushUsage();
+      } catch {
+        // Best-effort
+      }
+    }
+
+    // Drain retry state
+    const { heldErrors, orphanedIds } = retry.drain();
+    for (const heldError of heldErrors) {
       process.stdout.write(JSON.stringify(heldError) + "\n");
     }
-    pendingRetries.clear();
-    // Send error responses for any requests that never got a reply
-    for (const [id] of pendingClientRequests) {
+    for (const id of orphanedIds) {
       process.stdout.write(JSON.stringify({
         jsonrpc: "2.0", id,
         error: { code: -32000, message: "Upstream process exited" },
       }) + "\n");
     }
-    pendingClientRequests.clear();
+
     await logger.close();
     process.exit(code ?? 0);
   });

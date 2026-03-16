@@ -1,4 +1,5 @@
 import { readFile, writeFile, copyFile, mkdir, rm } from "node:fs/promises";
+import { appendFileSync, readFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
 import { compressOldSessions, garbageCollect } from "./lifecycle.js";
@@ -24,7 +25,19 @@ export interface HookInput {
   session_id?: string;
   cwd?: string;
   hook_event_name?: string;
+  tool_name?: string;
+  tool_input?: unknown;
+  tool_output?: string;
   [key: string]: unknown;
+}
+
+export interface ToolCallEntry {
+  session_id: string;
+  timestamp: string;
+  tool_name: string;
+  tool_input: unknown;
+  tool_output: string | null;
+  tool_output_truncated: boolean;
 }
 
 const FLIGHT_HOOK_MARKER = "flight hook";
@@ -43,6 +56,13 @@ function makeFlightHooks(): Record<string, HookMatcher[]> {
       hooks: [{
         type: "command",
         command: "flight hook session-end",
+      }],
+    }],
+    PostToolUse: [{
+      matcher: "",
+      hooks: [{
+        type: "command",
+        command: "flight hook post-tool-use",
       }],
     }],
   };
@@ -169,4 +189,44 @@ export async function handleSessionEnd(stdinJson: string, logDir?: string): Prom
   garbageCollect(dir).catch(() => {});
 
   return output;
+}
+
+const TOOL_OUTPUT_MAX = 4096;
+
+export function handlePostToolUseSync(stdinJson: string, logDir?: string): string {
+  let input: HookInput;
+  try {
+    input = JSON.parse(stdinJson) as HookInput;
+  } catch {
+    return "[flight] PostToolUse: invalid stdin JSON";
+  }
+
+  const dir = logDir ?? join(homedir(), ".flight", "logs");
+  mkdirSync(dir, { recursive: true });
+
+  // Resolve session ID: active marker > stdin > fallback
+  let sessionId = "unknown_" + Date.now();
+  try {
+    const marker = readFileSync(join(dir, ".active_session"), "utf-8").trim();
+    if (marker) sessionId = marker;
+  } catch {
+    if (input.session_id) sessionId = input.session_id;
+  }
+
+  const toolOutput = input.tool_output ?? null;
+  const truncated = toolOutput !== null && toolOutput.length > TOOL_OUTPUT_MAX;
+
+  const entry: ToolCallEntry = {
+    session_id: sessionId,
+    timestamp: new Date().toISOString(),
+    tool_name: input.tool_name ?? "unknown",
+    tool_input: input.tool_input ?? null,
+    tool_output: truncated ? toolOutput!.slice(0, TOOL_OUTPUT_MAX) : toolOutput,
+    tool_output_truncated: truncated,
+  };
+
+  const filePath = join(dir, `${sessionId}_tools.jsonl`);
+  appendFileSync(filePath, JSON.stringify(entry) + "\n");
+
+  return `[flight] Recorded ${entry.tool_name}`;
 }

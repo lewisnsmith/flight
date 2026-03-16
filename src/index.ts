@@ -7,5 +7,6 @@ export { computeSummary, formatSummary, type SessionSummary } from "./summary.js
 export { entriesToCsv, entriesToJsonl } from "./export.js";
 export { compressOldSessions, garbageCollect, pruneSessions } from "./lifecycle.js";
 export { computeStats, formatStats, type SessionStats } from "./stats.js";
-export { createPDHandler, type PDHandler, type ToolSchema } from "./progressive-disclosure.js";
+export { createPDHandler, createPDHandlerWithHistory, compressSchema, type PDHandler, type PDHandlerOptions, type PDPhase, type PDResponseResult, type ToolSchema, type UsageStore, type ToolUsage } from "./progressive-disclosure.js";
+export { createRetryManager, getToolNameFromRequest, type RetryManager, type RetryResult } from "./retry.js";
 export { findCallRequest, replayCall, type ReplayOptions, type ReplayResult } from "./replay.js";

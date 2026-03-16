@@ -2,12 +2,12 @@ import { Command } from "commander";
 import { createRequire } from "node:module";
 import { startProxy } from "./proxy.js";
 import { initClaude, initClaudeCode, getClaudeConfigPath, getClaudeCodeConfigPath } from "./init.js";
-import { listSessions, tailSession, viewSession, filterSessions, inspectCall, listAlerts, readLogEntriesForSession, readAllRecentSessions } from "./log-commands.js";
+import { listSessions, tailSession, viewSession, filterSessions, inspectCall, listAlerts, readLogEntriesForSession, readAllRecentSessions, listToolCalls } from "./log-commands.js";
 import { computeSummary, formatSummary } from "./summary.js";
 import { entriesToCsv, entriesToJsonl } from "./export.js";
 import { writeFile as fsWriteFile } from "node:fs/promises";
 import { runSetup, runRemove } from "./setup.js";
-import { handleSessionStart, handleSessionEnd } from "./hooks.js";
+import { handleSessionStart, handleSessionEnd, handlePostToolUseSync } from "./hooks.js";
 import { compressOldSessions, garbageCollect, pruneSessions } from "./lifecycle.js";
 import { computeStats, computeAggregateStats, formatStats, formatAggregateStats } from "./stats.js";
 import { findCallRequest, replayCall } from "./replay.js";
@@ -28,15 +28,17 @@ program
   .requiredOption("--cmd <command>", "Upstream MCP server command")
   .option("--quiet", "Suppress non-critical stderr output")
   .option("--no-retry", "Disable auto-retry for read-only tool calls")
-  .option("--pd", "Enable progressive disclosure (replace tool schemas with meta-tools)")
+  .option("--pd", "Enable progressive disclosure (compress schemas, filter unused tools)")
+  .option("--pd-history <n>", "Sessions with zero usage before hiding a tool (default: 3)", "3")
   .argument("[args...]", "Arguments to pass to upstream command")
-  .action(async (args: string[], options: { cmd: string; quiet?: boolean; retry: boolean; pd?: boolean }) => {
+  .action(async (args: string[], options: { cmd: string; quiet?: boolean; retry: boolean; pd?: boolean; pdHistory?: string }) => {
     await startProxy({
       command: options.cmd,
       args,
       quiet: options.quiet,
       noRetry: !options.retry,
       pd: options.pd,
+      pdHistory: options.pdHistory ? parseInt(options.pdHistory, 10) : undefined,
     });
   });
 
@@ -163,6 +165,19 @@ log
     }
     const summary = computeSummary(entries);
     console.log(formatSummary(summary));
+  });
+
+log
+  .command("tools")
+  .argument("[session]", "Session ID (default: most recent)")
+  .option("--tool <name>", "Filter by tool name")
+  .option("--limit <n>", "Number of entries to show", "50")
+  .description("Show recorded tool calls (built-in + MCP)")
+  .action(async (session?: string, options?: { tool?: string; limit?: string }) => {
+    await listToolCalls(session, {
+      tool: options?.tool,
+      limit: options?.limit ? parseInt(options.limit, 10) : undefined,
+    });
   });
 
 log
@@ -377,7 +392,7 @@ program
     const result = await runSetup();
 
     if (result.hooksInstalled) {
-      console.log(`\x1b[32m✓\x1b[0m Installed Claude Code hooks (SessionStart, SessionEnd)`);
+      console.log(`\x1b[32m✓\x1b[0m Installed Claude Code hooks (SessionStart, SessionEnd, PostToolUse)`);
     } else {
       console.log(`\x1b[33m!\x1b[0m Hooks already installed`);
     }
@@ -423,6 +438,18 @@ hook
       stdin += chunk;
     }
     const output = await handleSessionEnd(stdin);
+    process.stderr.write(output + "\n");
+  });
+
+hook
+  .command("post-tool-use")
+  .description("Handle PostToolUse hook")
+  .action(async () => {
+    let stdin = "";
+    for await (const chunk of process.stdin) {
+      stdin += chunk;
+    }
+    const output = handlePostToolUseSync(stdin);
     process.stderr.write(output + "\n");
   });
 

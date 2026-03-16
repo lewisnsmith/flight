@@ -18,6 +18,8 @@ export interface LogEntry {
   hallucination_hint?: boolean;
   pd_active: boolean;
   schema_tokens_saved?: number;
+  pd_phase?: 1 | 2 | 3;
+  pd_tool_hidden?: boolean;
 }
 
 export interface AlertEntry {
@@ -31,7 +33,7 @@ export interface AlertEntry {
 }
 
 export interface SessionLogger {
-  log(msg: JsonRpcMessage, direction: "client->server" | "server->client", extraFields?: Partial<Pick<LogEntry, "pd_active" | "schema_tokens_saved">>): void;
+  log(msg: JsonRpcMessage, direction: "client->server" | "server->client", extraFields?: Partial<Pick<LogEntry, "pd_active" | "schema_tokens_saved" | "pd_phase" | "pd_tool_hidden">>): void;
   logError(source: string, message: string): void;
   close(): Promise<void>;
   closeSync(): void;
@@ -236,7 +238,7 @@ export async function createSessionLogger(logDir?: string, redactionOptions?: Re
     onAlert: undefined,
     pdActive: false,
 
-    log(msg: JsonRpcMessage, direction: "client->server" | "server->client", extraFields?: Partial<Pick<LogEntry, "pd_active" | "schema_tokens_saved">>) {
+    log(msg: JsonRpcMessage, direction: "client->server" | "server->client", extraFields?: Partial<Pick<LogEntry, "pd_active" | "schema_tokens_saved" | "pd_phase" | "pd_tool_hidden">>) {
       const now = Date.now();
       const callId = (msg.id != null ? String(msg.id) : randomUUID());
       let latencyMs = 0;
@@ -311,6 +313,8 @@ export async function createSessionLogger(logDir?: string, redactionOptions?: Re
         hallucination_hint: hallucinationHint,
         pd_active: extraFields?.pd_active ?? logger.pdActive,
         schema_tokens_saved: extraFields?.schema_tokens_saved,
+        pd_phase: extraFields?.pd_phase,
+        pd_tool_hidden: extraFields?.pd_tool_hidden,
       };
 
       enqueue(redact(JSON.stringify(entry)));

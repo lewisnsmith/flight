@@ -3,8 +3,8 @@
  * Claude API-driven PD validation.
  *
  * Sends real prompts to Claude through the Flight proxy wrapping a mock MCP server.
- * Claude decides which tools to call — this tests whether PD (discover_tools +
- * execute_tool) degrades real AI task completion vs direct tool access.
+ * Claude decides which tools to call — this tests whether PD (compression +
+ * usage-adaptive filtering) degrades real AI task completion vs direct tool access.
  *
  * Usage:
  *   ANTHROPIC_API_KEY=sk-... npx tsx test/simulate/validate-claude-api.ts
@@ -47,11 +47,8 @@ interface ToolCallRecord {
   error: string | null;
 }
 
-/** Get the effective tool name, resolving execute_tool wrappers */
+/** Get the effective tool name (no wrapper resolution needed with new PD) */
 function effectiveTool(c: ToolCallRecord): string {
-  if (c.tool === "execute_tool" && typeof c.args.tool_name === "string") {
-    return c.args.tool_name;
-  }
   return c.tool;
 }
 

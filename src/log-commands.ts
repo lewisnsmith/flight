@@ -7,6 +7,7 @@ import { pipeline } from "node:stream/promises";
 import { Writable } from "node:stream";
 import type { LogEntry, AlertEntry } from "./logger.js";
 import { getAlertLogPath } from "./logger.js";
+import type { ToolCallEntry } from "./hooks.js";
 
 const DEFAULT_LOG_DIR = join(homedir(), ".flight", "logs");
 
@@ -41,7 +42,7 @@ async function getLogFiles(): Promise<string[]> {
   try {
     const files = await readdir(DEFAULT_LOG_DIR);
     return files
-      .filter((f) => f.endsWith(".jsonl") || f.endsWith(".jsonl.gz"))
+      .filter((f) => (f.endsWith(".jsonl") || f.endsWith(".jsonl.gz")) && !f.includes("_tools."))
       .sort()
       .reverse();
   } catch {
@@ -390,4 +391,93 @@ export async function listAlerts(options: { limit?: number; session?: string } =
   }
 
   console.log(`\n${C.dim}Showing ${alerts.length} alert(s)${C.reset}`);
+}
+
+// --- Tool call log commands ---
+
+async function getToolLogFiles(): Promise<string[]> {
+  try {
+    const files = await readdir(DEFAULT_LOG_DIR);
+    return files
+      .filter((f) => f.endsWith("_tools.jsonl"))
+      .sort()
+      .reverse();
+  } catch {
+    return [];
+  }
+}
+
+export async function readToolCallsForSession(sessionId?: string): Promise<ToolCallEntry[]> {
+  const files = await getToolLogFiles();
+  if (files.length === 0) return [];
+
+  let targetFile: string | undefined;
+  if (sessionId) {
+    targetFile = files.find((f) => f.includes(sessionId));
+  } else {
+    targetFile = files[0]; // most recent
+  }
+
+  if (!targetFile) return [];
+
+  try {
+    const content = await readFile(join(DEFAULT_LOG_DIR, targetFile), "utf-8");
+    const entries: ToolCallEntry[] = [];
+    for (const line of content.trim().split("\n")) {
+      if (!line) continue;
+      try {
+        entries.push(JSON.parse(line) as ToolCallEntry);
+      } catch {
+        // skip malformed
+      }
+    }
+    return entries;
+  } catch {
+    return [];
+  }
+}
+
+export async function listToolCalls(
+  sessionId?: string,
+  options?: { tool?: string; limit?: number },
+): Promise<void> {
+  let entries = await readToolCallsForSession(sessionId);
+
+  if (entries.length === 0) {
+    console.log("No tool call data found. Tool calls are recorded via the PostToolUse hook.");
+    return;
+  }
+
+  if (options?.tool) {
+    const filter = options.tool;
+    entries = entries.filter((e) => e.tool_name === filter || e.tool_name.includes(filter));
+  }
+
+  const limit = options?.limit ?? 50;
+  if (entries.length > limit) {
+    entries = entries.slice(-limit);
+  }
+
+  // Header
+  console.log(
+    `${C.dim}${"Time".padEnd(12)} ${"Tool".padEnd(25)} ${"Input".padEnd(60)} ${"Output"}${C.reset}`,
+  );
+  console.log(`${C.dim}${"─".repeat(140)}${C.reset}`);
+
+  for (const entry of entries) {
+    const time = formatTime(entry.timestamp);
+    const tool = entry.tool_name.length > 24 ? entry.tool_name.slice(0, 22) + ".." : entry.tool_name;
+    const inputStr = truncateStr(JSON.stringify(entry.tool_input), 58);
+    const outputStr = entry.tool_output
+      ? truncateStr(entry.tool_output.replace(/\n/g, "\\n"), 38) + (entry.tool_output_truncated ? " [...]" : "")
+      : `${C.dim}(none)${C.reset}`;
+
+    console.log(`${C.dim}${time}${C.reset} ${C.cyan}${tool.padEnd(25)}${C.reset} ${inputStr.padEnd(60)} ${outputStr}`);
+  }
+
+  console.log(`\n${C.dim}Showing ${entries.length} tool call(s)${C.reset}`);
+}
+
+function truncateStr(s: string, max: number): string {
+  return s.length > max ? s.slice(0, max - 3) + "..." : s;
 }
