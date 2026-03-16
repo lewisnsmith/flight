@@ -227,6 +227,49 @@ describe("Integration: Proxy + Mock MCP Server", () => {
     proxy.close();
   }, 15000);
 
+  it("flushes logs cleanly on SIGTERM", async () => {
+    testLogDir = join(tmpdir(), `flight-integration-${Date.now()}`);
+    const proxy = createTestProxy(testLogDir);
+
+    // Initialize and send a tool call
+    proxy.send({ jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2024-11-05", capabilities: {}, clientInfo: { name: "test", version: "1.0" } } });
+    await proxy.waitForResponses(1);
+
+    proxy.send({ jsonrpc: "2.0", id: 2, method: "tools/list", params: {} });
+    await proxy.waitForResponses(2);
+
+    proxy.send({ jsonrpc: "2.0", id: 3, method: "tools/call", params: { name: "read_file", arguments: { path: "/test.ts" } } });
+    await proxy.waitForResponses(3);
+
+    // Send SIGTERM instead of killing immediately
+    const exitPromise = new Promise<number | null>((resolve) => {
+      proxy.child.on("close", (code) => resolve(code));
+    });
+    proxy.child.kill("SIGTERM");
+
+    const exitCode = await exitPromise;
+
+    // Proxy should exit (0 = clean shutdown, 143 = SIGTERM propagated, null = signal)
+    expect(exitCode === 0 || exitCode === 143 || exitCode === null).toBe(true);
+
+    // Wait briefly for filesystem flush
+    await new Promise((r) => setTimeout(r, 500));
+
+    // Verify log file was written with all entries
+    const files = await readdir(testLogDir);
+    const logFile = files.find((f) => f.endsWith(".jsonl"));
+    expect(logFile).toBeDefined();
+
+    const logContent = await readFile(join(testLogDir, logFile!), "utf-8");
+    const entries = logContent.trim().split("\n").filter(Boolean).map((l) => JSON.parse(l) as LogEntry);
+
+    // Should have at least 6 entries: 3 requests + 3 responses
+    expect(entries.length).toBeGreaterThanOrEqual(6);
+    expect(entries.some((e) => e.method === "initialize")).toBe(true);
+    expect(entries.some((e) => e.method === "tools/list")).toBe(true);
+    expect(entries.some((e) => e.tool_name === "read_file")).toBe(true);
+  }, 15000);
+
   it("detects hallucination hint pattern", async () => {
     testLogDir = join(tmpdir(), `flight-integration-${Date.now()}`);
     const proxy = createTestProxy(testLogDir);

@@ -229,15 +229,18 @@ export async function startProxy(options: ProxyOptions): Promise<void> {
     upstream.kill();
   });
 
-  process.on("SIGTERM", () => {
+  const handleSignal = () => {
     upstream.kill();
-    logger.closeSync();
-    process.exit(0);
-  });
+    // upstream.on("close") does full async cleanup (PD flush, retry drain, logger close, exit).
+    // Safety timeout in case close event never fires.
+    const safety = setTimeout(() => {
+      if (pdHandler) pdHandler.flushUsageSync();
+      logger.closeSync();
+      process.exit(0);
+    }, 5000);
+    safety.unref();
+  };
 
-  process.on("SIGINT", () => {
-    upstream.kill();
-    logger.closeSync();
-    process.exit(0);
-  });
+  process.on("SIGTERM", handleSignal);
+  process.on("SIGINT", handleSignal);
 }

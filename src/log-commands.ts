@@ -187,13 +187,11 @@ export async function tailSession(sessionId?: string): Promise<void> {
   console.log(`${C.dim}  Press Ctrl+C to stop${C.reset}\n`);
 
   // Print existing entries
-  let lastLineCount = 0;
   try {
     const entries = await readLogEntries(file);
     for (const entry of entries) {
       console.log(formatEntryLine(entry));
     }
-    lastLineCount = entries.length;
   } catch {
     // File might be empty
   }

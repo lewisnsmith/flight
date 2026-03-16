@@ -58,57 +58,58 @@ export interface RetryManager {
   drain(): { heldErrors: JsonRpcMessage[]; orphanedIds: (string | number)[] };
 }
 
+/** Explicit per-request state — replaces two synchronized maps */
+type RequestState =
+  | { status: "tracked"; request: JsonRpcMessage }
+  | { status: "retrying"; request: JsonRpcMessage; heldError: JsonRpcMessage };
+
 export function createRetryManager(enabled: boolean): RetryManager {
-  const pendingRequests = new Map<string | number, JsonRpcMessage>();
-  const pendingRetries = new Map<string | number, JsonRpcMessage>();
+  const requests = new Map<string | number, RequestState>();
 
   return {
     trackRequest(msg: JsonRpcMessage) {
       if (enabled && msg.id != null) {
-        pendingRequests.set(msg.id, msg);
+        requests.set(msg.id, { status: "tracked", request: msg });
       }
     },
 
     getOriginalRequest(id: string | number) {
-      return pendingRequests.get(id);
+      return requests.get(id)?.request;
     },
 
     clearRequest(id: string | number) {
-      pendingRequests.delete(id);
+      requests.delete(id);
     },
 
     handleResponse(msg: JsonRpcMessage, sendRetry: (req: JsonRpcMessage) => void): RetryResult {
       if (msg.id == null) return { handled: false };
 
+      const state = requests.get(msg.id);
+
       // Check if this is a response to a pending retry
-      if (pendingRetries.has(msg.id)) {
-        const heldError = pendingRetries.get(msg.id)!;
-        pendingRetries.delete(msg.id);
+      if (state?.status === "retrying") {
+        requests.delete(msg.id);
 
         if (msg.error) {
           // Retry also failed — forward original error
-          return { handled: true, forward: heldError };
+          return { handled: true, forward: state.heldError };
         }
         // Retry succeeded — forward success
         return { handled: true, forward: msg };
       }
 
       // Check if we should auto-retry this failed response
-      if (enabled && msg.error && !isPermanentError(msg)) {
-        const originalRequest = pendingRequests.get(msg.id);
-        if (originalRequest) {
-          const toolName = getToolNameFromRequest(originalRequest);
-          if (originalRequest.method === "tools/call" && isReadOnlyTool(toolName)) {
-            pendingRequests.delete(msg.id);
-            pendingRetries.set(msg.id, msg);
+      if (enabled && msg.error && !isPermanentError(msg) && state?.status === "tracked") {
+        const toolName = getToolNameFromRequest(state.request);
+        if (state.request.method === "tools/call" && isReadOnlyTool(toolName)) {
+          requests.set(msg.id, { status: "retrying", request: state.request, heldError: msg });
 
-            // Schedule retry after 500ms
-            setTimeout(() => {
-              sendRetry(originalRequest);
-            }, 500);
+          // Schedule retry after 500ms
+          setTimeout(() => {
+            sendRetry(state.request);
+          }, 500);
 
-            return { handled: true };
-          }
+          return { handled: true };
         }
       }
 
@@ -116,11 +117,17 @@ export function createRetryManager(enabled: boolean): RetryManager {
     },
 
     drain() {
-      const heldErrors = Array.from(pendingRetries.values());
-      pendingRetries.clear();
+      const heldErrors: JsonRpcMessage[] = [];
+      const orphanedIds: (string | number)[] = [];
 
-      const orphanedIds = Array.from(pendingRequests.keys());
-      pendingRequests.clear();
+      for (const [id, state] of requests) {
+        if (state.status === "retrying") {
+          heldErrors.push(state.heldError);
+        } else {
+          orphanedIds.push(id);
+        }
+      }
+      requests.clear();
 
       return { heldErrors, orphanedIds };
     },

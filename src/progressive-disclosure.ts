@@ -1,8 +1,13 @@
-import { readFile, writeFile, mkdir, open, unlink, stat } from "node:fs/promises";
+import { readFile, writeFile, mkdir } from "node:fs/promises";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
 import { createHash } from "node:crypto";
 import type { JsonRpcMessage } from "./json-rpc.js";
+import { compressSchema, estimateTokens } from "./pd-schema.js";
+import { acquireLock, releaseLock } from "./file-lock.js";
+
+export { compressSchema } from "./pd-schema.js";
 
 export interface ToolSchema {
   name: string;
@@ -80,61 +85,8 @@ export interface PDHandler {
   processResponse(originalRequest: JsonRpcMessage | undefined, response: JsonRpcMessage): PDResponseResult;
   /** Flush usage data to disk (call at session end) */
   flushUsage(): Promise<void>;
-}
-
-function estimateTokens(obj: unknown): number {
-  return Math.ceil(JSON.stringify(obj).length / 4);
-}
-
-/**
- * Compress a JSON Schema by stripping property descriptions, examples,
- * defaults, $comment, and redundant additionalProperties on nested objects.
- * Preserves: property names, type, required, enum, oneOf/anyOf/allOf.
- */
-export function compressSchema(schema: Record<string, unknown>): Record<string, unknown> {
-  return compressNode(schema, /* isRoot */ true) as Record<string, unknown>;
-}
-
-function compressNode(node: unknown, isRoot: boolean): unknown {
-  if (node === null || node === undefined || typeof node !== "object") {
-    return node;
-  }
-
-  if (Array.isArray(node)) {
-    return node.map((item) => compressNode(item, false));
-  }
-
-  const obj = node as Record<string, unknown>;
-  const result: Record<string, unknown> = {};
-
-  for (const [key, value] of Object.entries(obj)) {
-    // Strip fields on non-root nodes
-    if (!isRoot) {
-      if (key === "description") continue;
-      if (key === "examples") continue;
-      if (key === "default") continue;
-      if (key === "$comment") continue;
-      if (key === "additionalProperties" && value === false) continue;
-    }
-
-    // Recurse into nested structures
-    if (key === "properties" && typeof value === "object" && value !== null) {
-      const props = value as Record<string, unknown>;
-      const compressed: Record<string, unknown> = {};
-      for (const [propName, propSchema] of Object.entries(props)) {
-        compressed[propName] = compressNode(propSchema, false);
-      }
-      result[key] = compressed;
-    } else if (key === "items" && typeof value === "object") {
-      result[key] = compressNode(value, false);
-    } else if ((key === "oneOf" || key === "anyOf" || key === "allOf") && Array.isArray(value)) {
-      result[key] = value.map((item) => compressNode(item, false));
-    } else {
-      result[key] = value;
-    }
-  }
-
-  return result;
+  /** Sync best-effort flush for signal handler fallback — no locking */
+  flushUsageSync(): void;
 }
 
 function getToolNameFromParams(params: unknown): string | undefined {
@@ -168,61 +120,6 @@ async function saveUsageStore(store: UsageStore): Promise<void> {
   await mkdir(dir, { recursive: true });
   const path = join(dir, `${store.serverKey}.json`);
   await writeFile(path, JSON.stringify(store, null, 2));
-}
-
-const LOCK_RETRY_MS = 50;
-const LOCK_MAX_WAIT_MS = 2000;
-const LOCK_STALE_MS = 10_000; // Stale lock threshold
-
-async function acquireLock(serverKey: string): Promise<string> {
-  const lockPath = join(getUsageDir(), `${serverKey}.lock`);
-  await mkdir(getUsageDir(), { recursive: true });
-
-  const deadline = Date.now() + LOCK_MAX_WAIT_MS;
-  while (Date.now() < deadline) {
-    try {
-      // O_CREAT | O_EXCL — atomic creation, fails if file exists
-      const handle = await open(lockPath, "wx");
-      await handle.writeFile(String(process.pid));
-      await handle.close();
-      return lockPath;
-    } catch (err: unknown) {
-      if ((err as NodeJS.ErrnoException).code === "EEXIST") {
-        // Check for stale lock
-        try {
-          const content = await readFile(lockPath, "utf-8");
-          const lockStat = await stat(lockPath);
-          const age = Date.now() - lockStat.mtimeMs;
-          if (age > LOCK_STALE_MS) {
-            // Stale lock — remove and retry
-            try { await unlink(lockPath); } catch { /* race with another cleaner */ }
-            continue;
-          }
-          // Check if the PID is still alive
-          const pid = parseInt(content, 10);
-          if (pid && !isNaN(pid)) {
-            try { process.kill(pid, 0); } catch {
-              // Process is dead — stale lock
-              try { await unlink(lockPath); } catch { /* race */ }
-              continue;
-            }
-          }
-        } catch {
-          // Can't read lock file, will retry
-        }
-        await new Promise((r) => setTimeout(r, LOCK_RETRY_MS));
-        continue;
-      }
-      throw err;
-    }
-  }
-  // Timeout — proceed without lock (best-effort, don't block the session)
-  return "";
-}
-
-async function releaseLock(lockPath: string): Promise<void> {
-  if (!lockPath) return;
-  try { await unlink(lockPath); } catch { /* already removed */ }
 }
 
 const discoverToolSchema: ToolSchema = {
@@ -484,7 +381,7 @@ export function createPDHandler(options: PDHandlerOptions): PDHandler {
       const now = new Date().toISOString();
 
       // Acquire advisory file lock for atomic read-merge-write
-      const lockPath = await acquireLock(serverKey);
+      const lockPath = await acquireLock(join(getUsageDir(), `${serverKey}.lock`));
       try {
         const freshStore = await loadUsageFromDisk(serverKey);
         const store: UsageStore = freshStore
@@ -529,6 +426,53 @@ export function createPDHandler(options: PDHandlerOptions): PDHandler {
         await saveUsageStore(store);
       } finally {
         await releaseLock(lockPath);
+      }
+    },
+
+    flushUsageSync() {
+      try {
+        const now = new Date().toISOString();
+        const dir = getUsageDir();
+        const path = join(dir, `${serverKey}.json`);
+
+        let store: UsageStore;
+        try {
+          const content = readFileSync(path, "utf-8");
+          const existing = JSON.parse(content) as UsageStore;
+          store = { ...existing, tools: { ...existing.tools } };
+        } catch {
+          store = { serverKey, tools: {}, sessions: 0, lastUpdated: now };
+        }
+
+        const currentSession = store.sessions;
+        store.sessions++;
+        store.lastUpdated = now;
+
+        for (const [toolName, usage] of sessionUsage) {
+          const existing = store.tools[toolName];
+          if (existing) {
+            store.tools[toolName] = {
+              ...existing,
+              callCount: existing.callCount + usage.calls,
+              errors: existing.errors + usage.errors,
+              lastSessionUsed: currentSession,
+              lastUsed: now,
+            };
+          } else {
+            store.tools[toolName] = {
+              name: toolName,
+              callCount: usage.calls,
+              lastSessionUsed: currentSession,
+              lastUsed: now,
+              errors: usage.errors,
+            };
+          }
+        }
+
+        mkdirSync(dir, { recursive: true });
+        writeFileSync(path, JSON.stringify(store, null, 2));
+      } catch {
+        // Best-effort — signal handler path, don't throw
       }
     },
   };
