@@ -198,7 +198,7 @@ export async function startProxy(options: ProxyOptions): Promise<void> {
       try {
         await pdHandler.flushUsage();
       } catch {
-        // Best-effort
+        // Disk I/O or lock acquisition failure — best-effort, don't block exit
       }
     }
 

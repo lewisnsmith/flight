@@ -125,7 +125,7 @@ export async function createSessionLogger(logDir?: string, redactionOptions?: Re
       loggingEnabled = false;
     }
   } catch {
-    // If statfs fails, proceed with logging enabled
+    // statfs may fail on some platforms/filesystems — proceed with logging enabled
   }
 
   // Create the log file
@@ -249,8 +249,9 @@ export async function createSessionLogger(logDir?: string, redactionOptions?: Re
       let prevErrorMethod: string | undefined;
 
       if (direction === "client->server") {
-        // Hallucination detection: only applies to tools/call requests following a tools/call error
-        // (not notifications, resources/list, or other non-tool methods)
+        // Hallucination hint: if the agent calls a *different* tool within 30s of a
+        // tool error, flag it. Retrying the same tool is expected recovery behavior;
+        // switching tools suggests the agent may be confabulating a workaround.
         if (msg.method === "tools/call") {
           const lastResponse = recentResponses.length > 0
             ? recentResponses[recentResponses.length - 1]

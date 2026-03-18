@@ -89,6 +89,7 @@ export interface PDHandler {
   flushUsageSync(): void;
 }
 
+// Similar to getToolNameFromRequest in retry.ts — kept separate to avoid coupling PD to retry
 function getToolNameFromParams(params: unknown): string | undefined {
   if (params && typeof params === "object") {
     return (params as Record<string, unknown>).name as string | undefined;
@@ -111,6 +112,7 @@ async function loadUsageFromDisk(serverKey: string): Promise<UsageStore | null> 
     const content = await readFile(path, "utf-8");
     return JSON.parse(content) as UsageStore;
   } catch {
+    // File may not exist on first run — return null to trigger Phase 1
     return null;
   }
 }
@@ -324,6 +326,8 @@ export function createPDHandler(options: PDHandlerOptions): PDHandler {
       };
     },
 
+    // Note: on first tools/list response, this calls loadSchemas() to initialize the handler.
+    // This is intentional — PD activation is lazy, triggered by the upstream's first tool listing.
     processResponse(originalRequest: JsonRpcMessage | undefined, response: JsonRpcMessage): PDResponseResult {
       const result: PDResponseResult = { toolHidden: false };
 
@@ -441,6 +445,7 @@ export function createPDHandler(options: PDHandlerOptions): PDHandler {
           const existing = JSON.parse(content) as UsageStore;
           store = { ...existing, tools: { ...existing.tools } };
         } catch {
+          // Usage file may not exist yet — start fresh
           store = { serverKey, tools: {}, sessions: 0, lastUpdated: now };
         }
 
