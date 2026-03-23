@@ -1,8 +1,9 @@
 import { Command } from "commander";
 import { createRequire } from "node:module";
+import { printBanner } from "./art.js";
 import { startProxy } from "./proxy.js";
 import { initClaude, initClaudeCode, getClaudeConfigPath, getClaudeCodeConfigPath } from "./init.js";
-import { listSessions, tailSession, viewSession, filterSessions, inspectCall, listAlerts, readLogEntriesForSession, readAllRecentSessions, listToolCalls } from "./log-commands.js";
+import { listSessions, tailSession, viewSession, filterSessions, inspectCall, listAlerts, readLogEntriesForSession, readAllRecentSessions, listToolCalls, auditSession } from "./log-commands.js";
 import { computeSummary, formatSummary } from "./summary.js";
 import { entriesToCsv, entriesToJsonl } from "./export.js";
 import { writeFile as fsWriteFile } from "node:fs/promises";
@@ -20,7 +21,15 @@ const program = new Command();
 program
   .name("flight")
   .description("MCP flight recorder and token optimizer for AI coding agents")
-  .version(pkg.version);
+  .version(pkg.version)
+  .option("--no-banner", "Suppress the pixel-art banner");
+
+// Helper: print banner unless --no-banner was passed or env suppresses it
+function banner(command: string, opts: { toStderr?: boolean } = {}): void {
+  const root = program.opts<{ banner: boolean }>();
+  if (root.banner === false) return;
+  printBanner(command, opts);
+}
 
 program
   .command("proxy")
@@ -32,6 +41,7 @@ program
   .option("--pd-history <n>", "Sessions with zero usage before hiding a tool (default: 3)", "3")
   .argument("[args...]", "Arguments to pass to upstream command")
   .action(async (args: string[], options: { cmd: string; quiet?: boolean; retry: boolean; pd?: boolean; pdHistory?: string }) => {
+    banner("proxy", { toStderr: true });
     await startProxy({
       command: options.cmd,
       args,
@@ -49,6 +59,7 @@ program
   .option("--scope <scope>", "Config scope for claude-code: user or project", "user")
   .description("Generate config for a target MCP client")
   .action(async (target: string, options: { apply?: boolean; scope?: string }) => {
+    banner("init");
     if (target === "claude") {
       const result = await initClaude({ apply: options.apply });
 
@@ -105,6 +116,7 @@ log
   .command("list")
   .description("List all recorded sessions")
   .action(async () => {
+    banner("log list");
     await listSessions();
   });
 
@@ -113,6 +125,7 @@ log
   .option("--session <id>", "Session ID to tail (default: most recent)")
   .description("Live stream a session")
   .action(async (options: { session?: string }) => {
+    banner("log tail");
     await tailSession(options.session);
   });
 
@@ -121,6 +134,7 @@ log
   .argument("<session>", "Session ID to view")
   .description("Paginated timeline of a session")
   .action(async (session: string) => {
+    banner("log view");
     await viewSession(session);
   });
 
@@ -132,6 +146,7 @@ log
   .option("--session <id>", "Session ID (default: most recent)")
   .description("Filter session logs")
   .action(async (options: { tool?: string; errors?: boolean; hallucinations?: boolean; session?: string }) => {
+    banner("log filter");
     await filterSessions(options);
   });
 
@@ -141,6 +156,7 @@ log
   .option("--session <id>", "Session ID to search")
   .description("Pretty-print full request/response for a call")
   .action(async (callId: string, options: { session?: string }) => {
+    banner("log inspect");
     await inspectCall(callId, options.session);
   });
 
@@ -150,6 +166,7 @@ log
   .option("--session <id>", "Filter by session ID")
   .description("Show recent alerts across all sessions")
   .action(async (options: { limit?: string; session?: string }) => {
+    banner("log alerts");
     await listAlerts({ limit: options.limit ? parseInt(options.limit, 10) : undefined, session: options.session });
   });
 
@@ -158,6 +175,7 @@ log
   .argument("[session]", "Session ID (default: most recent)")
   .description("One-screen summary of a session")
   .action(async (session?: string) => {
+    banner("log summary");
     const entries = await readLogEntriesForSession(session);
     if (!entries || entries.length === 0) {
       console.log("No session data found.");
@@ -174,10 +192,20 @@ log
   .option("--limit <n>", "Number of entries to show", "50")
   .description("Show recorded tool calls (built-in + MCP)")
   .action(async (session?: string, options?: { tool?: string; limit?: string }) => {
+    banner("log tools");
     await listToolCalls(session, {
       tool: options?.tool,
       limit: options?.limit ? parseInt(options.limit, 10) : undefined,
     });
+  });
+
+log
+  .command("audit")
+  .argument("[session]", "Session ID (default: current active session)")
+  .description("Rich audit view of tool calls for a session (used by /flight-log)")
+  .action(async (session?: string) => {
+    banner("log audit");
+    await auditSession(session);
   });
 
 log
@@ -188,6 +216,7 @@ log
   .option("--dry-run", "Show what would be deleted without deleting")
   .description("Garbage-collect old session logs")
   .action(async (options: { maxSessions?: string; maxBytes?: string; compressAfter?: string; dryRun?: boolean }) => {
+    banner("log gc");
     const maxAgeMs = (parseInt(options.compressAfter ?? "24", 10)) * 60 * 60 * 1000;
     const compressResult = await compressOldSessions(undefined, { maxAgeMs });
     if (compressResult.compressed > 0) {
@@ -215,6 +244,7 @@ log
   .option("--keep <n>", "Keep only the N most recent sessions")
   .description("Prune session logs by date or count")
   .action(async (options: { before?: string; keep?: string }) => {
+    banner("log prune");
     const pruneOpts: { before?: Date; keep?: number } = {};
     if (options.before) {
       pruneOpts.before = new Date(options.before);
@@ -247,6 +277,8 @@ program
   .option("--hallucinations", "Include only entries with hallucination hints")
   .description("Export session logs to CSV or JSONL")
   .action(async (session: string | undefined, options: { format: string; output?: string; includePayload?: boolean; tool?: string; errors?: boolean; hallucinations?: boolean }) => {
+    // Only show banner when writing to a file — stdout export is a data stream
+    if (options.output) banner("export");
     let entries = await readLogEntriesForSession(session);
 
     if (!entries || entries.length === 0) {
@@ -290,6 +322,7 @@ program
   .argument("[session]", "Session ID (default: most recent, omit for aggregate)")
   .description("Show token savings and call statistics")
   .action(async (session?: string) => {
+    banner("stats");
     if (session) {
       const entries = await readLogEntriesForSession(session);
       if (!entries || entries.length === 0) {
@@ -320,6 +353,7 @@ program
   .argument("[args...]", "Arguments to pass to upstream command")
   .description("Re-execute a recorded tool call against an upstream MCP server")
   .action(async (callId: string, args: string[], options: { cmd: string; dryRun?: boolean; session?: string }) => {
+    banner("replay");
     const entries = await readLogEntriesForSession(options.session);
     if (!entries || entries.length === 0) {
       console.error("No session data found.");
@@ -376,6 +410,7 @@ program
   .description("Auto-configure Flight with Claude Code (wraps MCP servers + installs hooks)")
   .option("--remove", "Remove Flight hooks and restore original config")
   .action(async (options: { remove?: boolean }) => {
+    banner("setup");
     if (options.remove) {
       const result = await runRemove();
       if (result.hooksRemoved) {
@@ -385,6 +420,9 @@ program
       }
       if (result.configRestored) {
         console.log(`\x1b[32m✓\x1b[0m Restored original MCP config from backup`);
+      }
+      if (result.slashCommandRemoved) {
+        console.log(`\x1b[32m✓\x1b[0m Removed /flight-log slash command`);
       }
       return;
     }
@@ -408,7 +446,14 @@ program
       console.log(`\x1b[33m!\x1b[0m No MCP servers found in ~/.claude.json`);
     }
 
+    if (result.slashCommandInstalled) {
+      console.log(`\x1b[32m✓\x1b[0m Installed /flight-log slash command`);
+    } else {
+      console.log(`\x1b[33m!\x1b[0m /flight-log slash command already installed`);
+    }
+
     console.log(`\n\x1b[32m✓\x1b[0m Flight is ready. Start a Claude Code session — recording is automatic.`);
+    console.log(`  Run \x1b[36m/flight-log\x1b[0m in Claude Code to audit your session.`);
     console.log(`  Run \x1b[36mflight log tail\x1b[0m in another terminal to watch live.`);
   });
 

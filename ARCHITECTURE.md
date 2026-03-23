@@ -1,7 +1,8 @@
-# Flight Proxy Architecture
+# Flight Architecture
 
-This document describes the internal architecture of Flight Proxy, a local MCP
-flight recorder and token optimizer for AI coding agents.
+This document describes the internal architecture of Flight, a flight recorder
+for AI coding agents that captures all tool calls (via hooks) and MCP traffic
+(via proxy), with hallucination detection and token optimization.
 
 ---
 
@@ -56,9 +57,8 @@ parseJsonRpcStream()          -- readline + JSON.parse per line
     v
 "message" event
     |
-    +---> [PD active?] ------> intercept discover_tools / execute_tool
-    |         |                  - discover_tools: respond locally, no upstream call
-    |         |                  - execute_tool: rewrite to real tools/call, forward
+    +---> [PD Phase 3?] -----> intercept discover_tools call
+    |         |                  - respond locally from cached schemas, no upstream call
     |         v
     +---> logger.log(msg, "client->server")
     |         |
@@ -89,8 +89,8 @@ parseJsonRpcStream()
     |         hold response, resend after 500ms, track in pendingRetries
     |
     +---> [PD active?] -----> intercept tools/list response:
-    |         cache real schemas, replace with 2 meta-tool schemas,
-    |         log token savings
+    |         cache real schemas, apply phase-appropriate transformation
+    |         (compress schemas and/or filter tools), log token savings
     |
     +---> logger.log(msg, "server->client")
     |         |
@@ -114,9 +114,44 @@ stderr when not in quiet mode.
 
 > **Note:** Progressive Disclosure is experimental and off by default. The mechanism works but has not been validated with real AI client sessions.
 
-Progressive disclosure (PD) reduces token overhead by replacing N tool
-schemas with 2 meta-tools. It activates when `--pd` is passed to the
-proxy.
+Progressive disclosure (PD) reduces token overhead by compressing tool
+schemas and hiding rarely-used tools. It activates when `--pd` is passed
+to the proxy and operates in three phases based on accumulated usage history.
+
+### Three-Phase Design
+
+```
+Phase 1 — Observation (no history)
+  All tools visible, schemas unmodified.
+  Records tool call counts per session for future decisions.
+
+Phase 2 — Schema Compression (1+ sessions of history)
+  All tools still visible, but schemas compressed via compressSchema():
+    - Strip property-level descriptions
+    - Remove defaults, $comment, redundant additionalProperties
+    - Preserve type, enum, required, structure
+  Achieves 30-60% token reduction on typical schemas.
+
+Phase 3 — Compression + Filtering (tools qualify for hiding)
+  Schema compression applied (same as Phase 2).
+  Tools unused for K+ sessions are hidden from tools/list.
+  A `discover_tools` meta-tool is appended so the client can
+  search for and re-discover hidden tools by keyword.
+  Hidden tools are still forwarded transparently if called directly.
+```
+
+### Phase Determination
+
+The phase is computed when `loadSchemas()` is called:
+
+```
+if no usage store or 0 sessions → Phase 1
+else if any tool's (sessions - lastSessionUsed) >= threshold → Phase 3
+else → Phase 2
+```
+
+The `historyThreshold` parameter (default: 3) controls how many sessions
+of non-use qualify a tool for hiding.
 
 ### Activation Sequence
 
@@ -126,24 +161,24 @@ proxy.
 3. Upstream responds with { tools: [T1, T2, ..., Tn] }
 4. Proxy intercepts response:
    a. Cache all N schemas in memory (Map<name, ToolSchema>)
-   b. Estimate token savings: ceil(JSON.stringify(allSchemas).length / 4)
-   c. Replace response with { tools: [discover_tools, execute_tool] }
+   b. Apply phase logic:
+      - Phase 1: return tools unmodified
+      - Phase 2: return all tools with compressed schemas
+      - Phase 3: return visible tools (compressed) + discover_tools
+   c. Log token savings estimate
    d. Set logger.pdActive = true
-5. Client receives only 2 tool schemas instead of N
+5. Client receives the phase-appropriate tool list
 ```
 
-### Meta-Tool Schemas
+### Meta-Tool: `discover_tools` (Phase 3 only)
 
-| Meta-Tool        | Purpose                                          |
-|------------------|--------------------------------------------------|
-| `discover_tools` | Search cached schemas by keyword (name + desc).  |
-|                  | Returns `[{ name, description }]`. No upstream   |
-|                  | call -- answered entirely from the in-memory      |
-|                  | schema cache.                                    |
-| `execute_tool`   | Proxy for real tool calls. Accepts `tool_name`   |
-|                  | and `arguments`. Validates the tool exists in    |
-|                  | the cache, rewrites the request to a real        |
-|                  | `tools/call`, and forwards to upstream.           |
+| Field       | Description                                             |
+|-------------|---------------------------------------------------------|
+| Purpose     | Search cached schemas by keyword (name + description).  |
+|             | Returns `[{ name, description }]` for matching hidden   |
+|             | tools. No upstream call — answered from in-memory cache.|
+| When added  | Only appended to tools/list in Phase 3, when at least   |
+|             | one tool is hidden.                                     |
 
 ### Routing Logic (in proxy.ts)
 
@@ -152,20 +187,22 @@ Client calls tools/call with name="discover_tools"
   --> pdHandler.discoverTools(query)
   --> respond directly to client (no upstream round-trip)
 
-Client calls tools/call with name="execute_tool"
-  --> pdHandler.resolveExecuteTool(tool_name, arguments)
-  --> if tool not found: return JSON-RPC error -32602
-  --> if found: rewrite to { method: "tools/call", params: { name, arguments } }
-  --> forward rewritten request to upstream
-
-Any other tools/call
+Any other tools/call (including hidden tools)
   --> forward to upstream as normal
 ```
+
+### Usage Tracking & Persistence
+
+Each tool call is recorded via `recordToolCall(name, isError)`. At session
+end, `flushUsage()` (async) or `flushUsageSync()` (signal handler path)
+merges session counts into the persistent store at
+`~/.flight/usage/<serverKey>.json`. Both paths delegate to the pure
+`mergeSessionUsage()` function for the actual merge logic.
 
 ### Token Savings Estimation
 
 Estimated via character count divided by 4:
-`savedTokens = ceil(len(JSON(allSchemas)) / 4) - ceil(len(JSON(metaSchemas)) / 4)`
+`savedTokens = ceil(len(JSON(originalSchemas)) / 4) - ceil(len(JSON(responseSchemas)) / 4)`
 
 Logged per-entry in the `schema_tokens_saved` field when PD rewrites occur.
 

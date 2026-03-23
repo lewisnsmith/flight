@@ -175,7 +175,7 @@ export async function handleSessionEnd(stdinJson: string, logDir?: string): Prom
   // Generate session summary
   let output = `[flight] Session ${sessionId} ended`;
   try {
-    const entries = await readLogEntriesForSession();
+    const entries = await readLogEntriesForSession(sessionId);
     if (entries && entries.length > 0) {
       const summary = computeSummary(entries);
       output = `\n${formatSummary(summary)}\n`;

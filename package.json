@@ -1,7 +1,7 @@
 {
   "name": "flight-proxy",
-  "version": "1.0.0",
-  "description": "MCP flight recorder and token optimizer for AI coding agents",
+  "version": "1.2.1",
+  "description": "Flight recorder for AI coding agents — captures every tool call, detects hallucinations, optimizes tokens",
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",

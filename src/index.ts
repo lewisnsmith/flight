@@ -4,9 +4,11 @@ export { initClaude, initClaudeCode, getClaudeConfigPath, getClaudeCodeConfigPat
 export { runSetup, runRemove, type SetupResult, type SetupOptions } from "./setup.js";
 export { installHooks, removeHooks } from "./hooks.js";
 export { computeSummary, formatSummary, type SessionSummary } from "./summary.js";
+export { auditSession } from "./log-commands.js";
 export { entriesToCsv, entriesToJsonl } from "./export.js";
 export { compressOldSessions, garbageCollect, pruneSessions } from "./lifecycle.js";
 export { computeStats, formatStats, type SessionStats } from "./stats.js";
 export { createPDHandler, createPDHandlerWithHistory, compressSchema, type PDHandler, type PDHandlerOptions, type PDPhase, type PDResponseResult, type ToolSchema, type UsageStore, type ToolUsage } from "./progressive-disclosure.js";
 export { createRetryManager, getToolNameFromRequest, type RetryManager, type RetryResult } from "./retry.js";
 export { findCallRequest, replayCall, type ReplayOptions, type ReplayResult } from "./replay.js";
+export { printBanner } from "./art.js";

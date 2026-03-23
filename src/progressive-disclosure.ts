@@ -43,6 +43,38 @@ export interface ToolUsage {
 
 export type PDPhase = 1 | 2 | 3;
 
+/**
+ * Merge per-session tool usage into a persistent usage store.
+ * Pure function — mutates `store.tools` in place but has no I/O side effects.
+ */
+export function mergeSessionUsage(
+  store: UsageStore,
+  sessionUsage: Map<string, { calls: number; errors: number }>,
+  currentSession: number,
+  now: string,
+): void {
+  for (const [toolName, usage] of sessionUsage) {
+    const existing = store.tools[toolName];
+    if (existing) {
+      store.tools[toolName] = {
+        ...existing,
+        callCount: existing.callCount + usage.calls,
+        errors: existing.errors + usage.errors,
+        lastSessionUsed: currentSession,
+        lastUsed: now,
+      };
+    } else {
+      store.tools[toolName] = {
+        name: toolName,
+        callCount: usage.calls,
+        lastSessionUsed: currentSession,
+        lastUsed: now,
+        errors: usage.errors,
+      };
+    }
+  }
+}
+
 export interface PDResponseResult {
   /** If set, send this rewritten response instead of the original */
   rewrittenResponse?: JsonRpcMessage;
@@ -396,27 +428,7 @@ export function createPDHandler(options: PDHandlerOptions): PDHandler {
         store.sessions++;
         store.lastUpdated = now;
 
-        // Merge session usage into store
-        for (const [toolName, usage] of sessionUsage) {
-          const existing = store.tools[toolName];
-          if (existing) {
-            store.tools[toolName] = {
-              ...existing,
-              callCount: existing.callCount + usage.calls,
-              errors: existing.errors + usage.errors,
-              lastSessionUsed: currentSession,
-              lastUsed: now,
-            };
-          } else {
-            store.tools[toolName] = {
-              name: toolName,
-              callCount: usage.calls,
-              lastSessionUsed: currentSession,
-              lastUsed: now,
-              errors: usage.errors,
-            };
-          }
-        }
+        mergeSessionUsage(store, sessionUsage, currentSession, now);
 
         // Prune tools that no longer exist upstream
         if (active) {
@@ -453,26 +465,7 @@ export function createPDHandler(options: PDHandlerOptions): PDHandler {
         store.sessions++;
         store.lastUpdated = now;
 
-        for (const [toolName, usage] of sessionUsage) {
-          const existing = store.tools[toolName];
-          if (existing) {
-            store.tools[toolName] = {
-              ...existing,
-              callCount: existing.callCount + usage.calls,
-              errors: existing.errors + usage.errors,
-              lastSessionUsed: currentSession,
-              lastUsed: now,
-            };
-          } else {
-            store.tools[toolName] = {
-              name: toolName,
-              callCount: usage.calls,
-              lastSessionUsed: currentSession,
-              lastUsed: now,
-              errors: usage.errors,
-            };
-          }
-        }
+        mergeSessionUsage(store, sessionUsage, currentSession, now);
 
         mkdirSync(dir, { recursive: true });
         writeFileSync(path, JSON.stringify(store, null, 2));

@@ -2,6 +2,7 @@ import { describe, it, expect } from "vitest";
 import {
   createPDHandler,
   compressSchema,
+  mergeSessionUsage,
   type ToolSchema,
   type UsageStore,
 } from "../src/progressive-disclosure.js";
@@ -382,6 +383,58 @@ describe("Schema Compression", () => {
     // Spec example: 388 → 150 chars (~61% reduction)
     const reduction = 1 - compressed.length / original.length;
     expect(reduction).toBeGreaterThan(0.3);
+  });
+});
+
+describe("mergeSessionUsage", () => {
+  it("adds new tools to an empty store", () => {
+    const store: UsageStore = { serverKey: "test", tools: {}, sessions: 1, lastUpdated: "2026-01-01" };
+    const sessionUsage = new Map([
+      ["read_file", { calls: 3, errors: 0 }],
+      ["write_file", { calls: 1, errors: 1 }],
+    ]);
+
+    mergeSessionUsage(store, sessionUsage, 0, "2026-01-02");
+
+    expect(store.tools.read_file).toEqual({
+      name: "read_file", callCount: 3, lastSessionUsed: 0, lastUsed: "2026-01-02", errors: 0,
+    });
+    expect(store.tools.write_file).toEqual({
+      name: "write_file", callCount: 1, lastSessionUsed: 0, lastUsed: "2026-01-02", errors: 1,
+    });
+  });
+
+  it("merges into existing tool entries", () => {
+    const store: UsageStore = {
+      serverKey: "test",
+      tools: {
+        read_file: { name: "read_file", callCount: 10, lastSessionUsed: 2, lastUsed: "2026-01-03", errors: 1 },
+      },
+      sessions: 4,
+      lastUpdated: "2026-01-03",
+    };
+    const sessionUsage = new Map([
+      ["read_file", { calls: 5, errors: 2 }],
+    ]);
+
+    mergeSessionUsage(store, sessionUsage, 3, "2026-01-04");
+
+    expect(store.tools.read_file).toEqual({
+      name: "read_file", callCount: 15, lastSessionUsed: 3, lastUsed: "2026-01-04", errors: 3,
+    });
+  });
+
+  it("handles empty session usage (no-op)", () => {
+    const store: UsageStore = {
+      serverKey: "test",
+      tools: { read_file: { name: "read_file", callCount: 5, lastSessionUsed: 0, lastUsed: "2026-01-01", errors: 0 } },
+      sessions: 1,
+      lastUpdated: "2026-01-01",
+    };
+
+    mergeSessionUsage(store, new Map(), 1, "2026-01-02");
+
+    expect(store.tools.read_file.callCount).toBe(5); // unchanged
   });
 });
 

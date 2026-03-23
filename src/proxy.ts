@@ -241,6 +241,6 @@ export async function startProxy(options: ProxyOptions): Promise<void> {
     safety.unref();
   };
 
-  process.on("SIGTERM", handleSignal);
-  process.on("SIGINT", handleSignal);
+  process.once("SIGTERM", handleSignal);
+  process.once("SIGINT", handleSignal);
 }

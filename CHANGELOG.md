@@ -1,5 +1,28 @@
 # Changelog
 
+## 1.2.1
+
+### Added
+- Pixel art airplane banner printed as a header when any Flight CLI command runs
+- `--no-banner` global flag to suppress the banner
+- `FLIGHT_NO_BANNER=1` env var alternative for scripting/CI
+- `printBanner()` exported from the public API for programmatic use
+- Banner respects `NO_COLOR` and skips output on non-TTY streams
+
+## 1.2.0
+
+### Added
+- `flight log audit` — rich audit view of tool calls for the current session (powers `/flight-log` slash command)
+- `/flight-log` slash command installed by `flight setup`
+- Active session marker (`~/.flight/logs/.active_session`) for hook-aware session resolution
+- `mergeSessionUsage()` exported for programmatic usage tracking in progressive disclosure
+- SIGTERM/SIGINT signal handlers hardened in proxy startup
+
+### Changed
+- Progressive disclosure phase logic refactored for clarity; `mergeSessionUsage` extracted as a pure function
+- Updated package description to better reflect scope
+- Improved README, ARCHITECTURE.md, and CLAUDE.md docs
+
 ## 1.0.0
 
 ### Core

@@ -479,3 +479,164 @@ export async function listToolCalls(
 function truncateStr(s: string, max: number): string {
   return s.length > max ? s.slice(0, max - 3) + "..." : s;
 }
+
+// --- Audit command (designed for /flight-log slash command) ---
+
+async function resolveCurrentSessionId(): Promise<string | null> {
+  try {
+    const markerPath = join(DEFAULT_LOG_DIR, ".active_session");
+    const content = await readFile(markerPath, "utf-8");
+    return content.trim() || null;
+  } catch {
+    return null;
+  }
+}
+
+interface AuditStats {
+  total: number;
+  byTool: Map<string, { count: number; errors: number }>;
+  errors: ToolCallEntry[];
+  timeline: ToolCallEntry[];
+}
+
+function computeAuditStats(entries: ToolCallEntry[]): AuditStats {
+  const byTool = new Map<string, { count: number; errors: number }>();
+  const errors: ToolCallEntry[] = [];
+
+  for (const entry of entries) {
+    const stats = byTool.get(entry.tool_name) ?? { count: 0, errors: 0 };
+    stats.count++;
+    // Detect errors: tool_output containing error indicators
+    const output = entry.tool_output ?? "";
+    const isError =
+      output.includes('"isError":true') ||
+      output.includes('"error"') ||
+      output.startsWith("Error:") ||
+      output.startsWith("error:");
+    if (isError) {
+      stats.errors++;
+      errors.push(entry);
+    }
+    byTool.set(entry.tool_name, stats);
+  }
+
+  return { total: entries.length, byTool, errors, timeline: entries };
+}
+
+export async function auditSession(sessionId?: string): Promise<void> {
+  // Resolve session: explicit > active marker > most recent file
+  const activeSession = await resolveCurrentSessionId();
+  const resolvedId = sessionId ?? activeSession ?? undefined;
+
+  const entries = await readToolCallsForSession(resolvedId);
+
+  if (entries.length === 0) {
+    console.log("No tool call data found for this session.");
+    console.log("Tool calls are recorded via the PostToolUse hook — make sure Flight is set up.");
+    return;
+  }
+
+  const sid = entries[0].session_id;
+  const stats = computeAuditStats(entries);
+
+  // --- Header ---
+  const firstTs = entries[0].timestamp;
+  const lastTs = entries[entries.length - 1].timestamp;
+  const durationMs = new Date(lastTs).getTime() - new Date(firstTs).getTime();
+  const durationStr = durationMs > 60000
+    ? `${Math.floor(durationMs / 60000)}m ${Math.floor((durationMs % 60000) / 1000)}s`
+    : `${Math.floor(durationMs / 1000)}s`;
+
+  console.log(`${C.cyan}━━━ Flight Audit ━━━${C.reset}`);
+  console.log(`${C.cyan}Session:${C.reset}  ${sid}`);
+  console.log(`${C.cyan}Duration:${C.reset} ${durationStr} (${formatTime(firstTs)} → ${formatTime(lastTs)})`);
+  console.log(`${C.cyan}Calls:${C.reset}    ${stats.total}`);
+  console.log(`${C.cyan}Errors:${C.reset}   ${stats.errors.length > 0 ? C.red + stats.errors.length + C.reset : "0"}`);
+  console.log();
+
+  // --- Tool breakdown ---
+  console.log(`${C.cyan}Tool Breakdown:${C.reset}`);
+  const sorted = [...stats.byTool.entries()].sort((a, b) => b[1].count - a[1].count);
+  for (const [name, s] of sorted) {
+    const bar = "█".repeat(Math.min(Math.ceil(s.count / stats.total * 30), 30));
+    const errStr = s.errors > 0 ? ` ${C.red}(${s.errors} err)${C.reset}` : "";
+    console.log(`  ${C.cyan}${name.padEnd(25)}${C.reset} ${C.dim}${bar}${C.reset} ${s.count}${errStr}`);
+  }
+  console.log();
+
+  // --- Errors section ---
+  if (stats.errors.length > 0) {
+    console.log(`${C.red}━━━ Errors (${stats.errors.length}) ━━━${C.reset}`);
+    for (const err of stats.errors) {
+      const time = formatTime(err.timestamp);
+      const inputStr = truncateStr(JSON.stringify(err.tool_input), 80);
+      const outputStr = err.tool_output
+        ? truncateStr(err.tool_output.replace(/\n/g, "\\n"), 120)
+        : "(no output)";
+      console.log(`  ${C.dim}${time}${C.reset} ${C.red}${err.tool_name}${C.reset}`);
+      console.log(`    ${C.dim}Input:${C.reset}  ${inputStr}`);
+      console.log(`    ${C.dim}Output:${C.reset} ${outputStr}`);
+      console.log();
+    }
+  }
+
+  // --- Full timeline ---
+  console.log(`${C.cyan}━━━ Timeline (${entries.length} calls) ━━━${C.reset}`);
+  console.log(
+    `${C.dim}${"#".padStart(4)} ${"Time".padEnd(12)} ${"Tool".padEnd(25)} ${"Input (summary)".padEnd(60)} ${"Status"}${C.reset}`,
+  );
+  console.log(`${C.dim}${"─".repeat(120)}${C.reset}`);
+
+  for (let i = 0; i < entries.length; i++) {
+    const entry = entries[i];
+    const time = formatTime(entry.timestamp);
+    const tool = entry.tool_name.length > 24 ? entry.tool_name.slice(0, 22) + ".." : entry.tool_name;
+    const inputStr = truncateStr(summarizeInput(entry), 58);
+    const output = entry.tool_output ?? "";
+    const isError =
+      output.includes('"isError":true') ||
+      output.includes('"error"') ||
+      output.startsWith("Error:") ||
+      output.startsWith("error:");
+    const status = isError
+      ? `${C.red}ERR${C.reset}`
+      : `${C.green}OK${C.reset}`;
+
+    console.log(
+      `${C.dim}${String(i + 1).padStart(4)}${C.reset} ${C.dim}${time}${C.reset} ${C.cyan}${tool.padEnd(25)}${C.reset} ${inputStr.padEnd(60)} ${status}`,
+    );
+  }
+
+  console.log();
+  console.log(`${C.dim}End of audit. ${stats.total} tool calls, ${stats.errors.length} errors.${C.reset}`);
+}
+
+/** Produce a human-readable summary of tool input */
+function summarizeInput(entry: ToolCallEntry): string {
+  const input = entry.tool_input;
+  if (input === null || input === undefined) return "(none)";
+  if (typeof input === "string") return input;
+  if (typeof input !== "object") return String(input);
+
+  const obj = input as Record<string, unknown>;
+
+  // Common patterns for Claude Code tools
+  if (obj.command && typeof obj.command === "string") {
+    return `$ ${obj.command}`;
+  }
+  if (obj.file_path && typeof obj.file_path === "string") {
+    const p = obj.file_path as string;
+    // Show just the filename or last path segments
+    const parts = p.split("/");
+    return parts.length > 2 ? "…/" + parts.slice(-2).join("/") : p;
+  }
+  if (obj.pattern && typeof obj.pattern === "string") {
+    return `/${obj.pattern}/` + (obj.path ? ` in ${truncateStr(String(obj.path), 30)}` : "");
+  }
+  if (obj.prompt && typeof obj.prompt === "string") {
+    return truncateStr(obj.prompt as string, 58);
+  }
+
+  // Fallback: stringify
+  return truncateStr(JSON.stringify(input), 58);
+}
