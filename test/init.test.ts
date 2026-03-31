@@ -16,6 +16,7 @@ describe("wrapWithFlight", () => {
     expect(result.filesystem.command).toBe("flight");
     expect(result.filesystem.args).toEqual([
       "proxy",
+      "--pd",
       "--cmd",
       "mcp-server-filesystem",
       "--",
@@ -56,7 +57,7 @@ describe("wrapWithFlight", () => {
       },
     });
 
-    expect(result.simple.args).toEqual(["proxy", "--cmd", "my-server"]);
+    expect(result.simple.args).toEqual(["proxy", "--pd", "--cmd", "my-server"]);
   });
 
   it("wraps multiple servers", () => {
