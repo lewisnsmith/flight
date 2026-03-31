@@ -3,11 +3,12 @@ import { createRequire } from "node:module";
 import { printBanner } from "./art.js";
 import { startProxy } from "./proxy.js";
 import { initClaude, initClaudeCode, getClaudeConfigPath, getClaudeCodeConfigPath } from "./init.js";
-import { listSessions, tailSession, viewSession, filterSessions, inspectCall, listAlerts, readLogEntriesForSession, readAllRecentSessions, listToolCalls, auditSession } from "./log-commands.js";
+import { listSessions, tailSession, viewSession, filterSessions, inspectCall, listAlerts, readLogEntriesForSession, readAllRecentSessions, listToolCalls, auditSession, verboseSession } from "./log-commands.js";
 import { computeSummary, formatSummary } from "./summary.js";
 import { entriesToCsv, entriesToJsonl } from "./export.js";
 import { writeFile as fsWriteFile } from "node:fs/promises";
-import { runSetup, runRemove } from "./setup.js";
+import { runRemove, runSetupWizard } from "./setup.js";
+import type { SetupFeatures } from "./setup.js";
 import { handleSessionStart, handleSessionEnd, handlePostToolUseSync } from "./hooks.js";
 import { compressOldSessions, garbageCollect, pruneSessions } from "./lifecycle.js";
 import { computeStats, computeAggregateStats, formatStats, formatAggregateStats } from "./stats.js";
@@ -209,6 +210,15 @@ log
   });
 
 log
+  .command("verbose")
+  .argument("[session]", "Session ID (default: current active session)")
+  .description("Comprehensive view of all tool calls with full input/output payloads")
+  .action(async (session?: string) => {
+    banner("log verbose");
+    await verboseSession(session);
+  });
+
+log
   .command("gc")
   .option("--max-sessions <n>", "Maximum sessions to keep", "100")
   .option("--max-bytes <n>", "Maximum total bytes", String(2 * 1024 * 1024 * 1024))
@@ -407,11 +417,25 @@ program
 
 program
   .command("setup")
-  .description("Auto-configure Flight with Claude Code (wraps MCP servers + installs hooks)")
+  .description("Interactive setup wizard — configure Flight features for Claude Code")
   .option("--remove", "Remove Flight hooks and restore original config")
-  .action(async (options: { remove?: boolean }) => {
-    banner("setup");
+  .option("--hooks", "Enable hooks (skip prompt)")
+  .option("--no-hooks", "Disable hooks (skip prompt)")
+  .option("--proxy", "Enable proxy wrapping (skip prompt)")
+  .option("--no-proxy", "Disable proxy wrapping (skip prompt)")
+  .option("--pd", "Enable progressive disclosure (skip prompt)")
+  .option("--no-pd", "Disable progressive disclosure (skip prompt)")
+  .option("--slash-commands", "Enable slash commands (skip prompt)")
+  .option("--no-slash-commands", "Disable slash commands (skip prompt)")
+  .action(async (options: {
+    remove?: boolean;
+    hooks?: boolean;
+    proxy?: boolean;
+    pd?: boolean;
+    slashCommands?: boolean;
+  }) => {
     if (options.remove) {
+      banner("setup");
       const result = await runRemove();
       if (result.hooksRemoved) {
         console.log(`\x1b[32m✓\x1b[0m Removed Flight hooks from Claude Code settings`);
@@ -422,39 +446,23 @@ program
         console.log(`\x1b[32m✓\x1b[0m Restored original MCP config from backup`);
       }
       if (result.slashCommandRemoved) {
-        console.log(`\x1b[32m✓\x1b[0m Removed /flight-log slash command`);
+        console.log(`\x1b[32m✓\x1b[0m Removed /flight and /flight-log slash commands`);
       }
       return;
     }
 
-    const result = await runSetup();
+    // Build overrides from CLI flags
+    const overrides: Partial<SetupFeatures> = {};
+    if (options.hooks !== undefined) overrides.hooks = options.hooks;
+    if (options.proxy !== undefined) overrides.proxy = options.proxy;
+    if (options.pd !== undefined) overrides.pd = options.pd;
+    if (options.slashCommands !== undefined) overrides.slashCommands = options.slashCommands;
 
-    if (result.hooksInstalled) {
-      console.log(`\x1b[32m✓\x1b[0m Installed Claude Code hooks (SessionStart, SessionEnd, PostToolUse)`);
-    } else {
-      console.log(`\x1b[33m!\x1b[0m Hooks already installed`);
-    }
+    // Banner preference comes from the global --no-banner flag
+    const root = program.opts<{ banner: boolean }>();
+    if (root.banner === false) overrides.banner = false;
 
-    if (result.serversWrapped > 0) {
-      console.log(`\x1b[32m✓\x1b[0m Wrapped ${result.serversWrapped} MCP server(s): ${result.serverNames.join(", ")}`);
-      if (result.configBackedUp) {
-        console.log(`  Backup saved to ~/.claude.json.bak`);
-      }
-    } else if (result.serverNames.length > 0) {
-      console.log(`\x1b[33m!\x1b[0m All ${result.serverNames.length} server(s) already wrapped`);
-    } else {
-      console.log(`\x1b[33m!\x1b[0m No MCP servers found in ~/.claude.json`);
-    }
-
-    if (result.slashCommandInstalled) {
-      console.log(`\x1b[32m✓\x1b[0m Installed /flight-log slash command`);
-    } else {
-      console.log(`\x1b[33m!\x1b[0m /flight-log slash command already installed`);
-    }
-
-    console.log(`\n\x1b[32m✓\x1b[0m Flight is ready. Start a Claude Code session — recording is automatic.`);
-    console.log(`  Run \x1b[36m/flight-log\x1b[0m in Claude Code to audit your session.`);
-    console.log(`  Run \x1b[36mflight log tail\x1b[0m in another terminal to watch live.`);
+    await runSetupWizard(overrides);
   });
 
 // --- Hook commands (internal, called by Claude Code) ---

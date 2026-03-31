@@ -43,12 +43,19 @@ export async function replayCall(
   }
 
   return new Promise((resolve) => {
+    let resolved = false;
+    function resolveOnce(result: ReplayResult) {
+      if (resolved) return;
+      resolved = true;
+      resolve(result);
+    }
+
     const upstream = spawn(options.command, options.args, {
       stdio: ["pipe", "pipe", "pipe"],
     });
 
     if (!upstream.stdin || !upstream.stdout) {
-      resolve({ request: entry, error: "Failed to open pipes to upstream", dryRun: false });
+      resolveOnce({ request: entry, error: "Failed to open pipes to upstream", dryRun: false });
       return;
     }
 
@@ -59,7 +66,7 @@ export async function replayCall(
 
     const timeout = setTimeout(() => {
       upstream.kill();
-      resolve({ request: entry, error: "Replay timed out after 30s", dryRun: false });
+      resolveOnce({ request: entry, error: "Replay timed out after 30s", dryRun: false });
     }, 30_000);
 
     // For tools/call, we need to initialize first
@@ -91,7 +98,7 @@ export async function replayCall(
       if (initDone && msg.id === payload.id) {
         clearTimeout(timeout);
         upstream.kill();
-        resolve({ request: entry, response: msg, dryRun: false });
+        resolveOnce({ request: entry, response: msg, dryRun: false });
       }
     });
 
@@ -101,18 +108,16 @@ export async function replayCall(
 
     upstream.on("error", (err) => {
       clearTimeout(timeout);
-      resolve({ request: entry, error: `Spawn error: ${err.message}`, dryRun: false });
+      resolveOnce({ request: entry, error: `Spawn error: ${err.message}`, dryRun: false });
     });
 
     upstream.on("close", (code) => {
       clearTimeout(timeout);
-      if (!initDone) {
-        resolve({
-          request: entry,
-          error: `Upstream exited before responding (code ${code})${stderrOutput ? `: ${stderrOutput.trim()}` : ""}`,
-          dryRun: false,
-        });
-      }
+      resolveOnce({
+        request: entry,
+        error: `Upstream exited before responding (code ${code})${stderrOutput ? `: ${stderrOutput.trim()}` : ""}`,
+        dryRun: false,
+      });
     });
 
     // Send initialize

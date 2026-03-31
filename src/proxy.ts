@@ -3,6 +3,7 @@ import { parseJsonRpcStream, type JsonRpcMessage } from "./json-rpc.js";
 import { createSessionLogger, type AlertEntry } from "./logger.js";
 import { createPDHandlerWithHistory, type PDHandler } from "./progressive-disclosure.js";
 import { createRetryManager } from "./retry.js";
+import { C } from "./shared.js";
 
 export interface ProxyOptions {
   command: string;
@@ -29,15 +30,15 @@ export async function startProxy(options: ProxyOptions): Promise<void> {
     if (quiet) return;
     if (alert.severity === "hallucination") {
       process.stderr.write(
-        `\x1b[33m[flight] HALLUCINATION HINT: ${alert.message}\x1b[0m\n`,
+        `${C.yellow}[flight] HALLUCINATION HINT: ${alert.message}${C.reset}\n`,
       );
     } else if (alert.severity === "loop") {
       process.stderr.write(
-        `\x1b[33m[flight] LOOP DETECTED: ${alert.message}\x1b[0m\n`,
+        `${C.yellow}[flight] LOOP DETECTED: ${alert.message}${C.reset}\n`,
       );
     } else if (alert.severity === "error") {
       process.stderr.write(
-        `\x1b[31m[flight] TOOL ERROR: ${alert.tool_name ?? alert.method} — ${alert.message}\x1b[0m\n`,
+        `${C.red}[flight] TOOL ERROR: ${alert.tool_name ?? alert.method} — ${alert.message}${C.reset}\n`,
       );
     }
   };
@@ -63,9 +64,6 @@ export async function startProxy(options: ProxyOptions): Promise<void> {
   }
 
   const retry = createRetryManager(!options.noRetry);
-
-  // Track MCP protocol version from initialize handshake
-  let mcpProtocolVersion: string | undefined;
 
   // Client → Upstream: forward stdin and log
   const clientParser = parseJsonRpcStream(process.stdin);
@@ -120,20 +118,6 @@ export async function startProxy(options: ProxyOptions): Promise<void> {
         process.stdout.write(JSON.stringify(retryResult.forward) + "\n");
       }
       return;
-    }
-
-    // --- Protocol version tracking ---
-    if (msg.result && !msg.error && msg.id != null) {
-      const originalRequest = retry.getOriginalRequest(msg.id);
-      if (originalRequest?.method === "initialize" && msg.result) {
-        const result = msg.result as Record<string, unknown>;
-        if (result.protocolVersion) {
-          mcpProtocolVersion = String(result.protocolVersion);
-          if (!quiet) {
-            process.stderr.write(`[flight] MCP protocol version: ${mcpProtocolVersion}\n`);
-          }
-        }
-      }
     }
 
     // --- Progressive disclosure response processing ---

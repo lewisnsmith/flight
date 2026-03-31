@@ -3,9 +3,7 @@ import { join } from "node:path";
 import { createGzip } from "node:zlib";
 import { createReadStream, createWriteStream } from "node:fs";
 import { pipeline } from "node:stream/promises";
-import { homedir } from "node:os";
-
-const DEFAULT_LOG_DIR = join(homedir(), ".flight", "logs");
+import { DEFAULT_LOG_DIR } from "./shared.js";
 
 export interface CompressOptions {
   maxAgeMs?: number;

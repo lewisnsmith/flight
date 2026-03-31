@@ -1,13 +1,7 @@
 import { readFile, writeFile, copyFile, mkdir } from "node:fs/promises";
 import { join } from "node:path";
 import { homedir, platform } from "node:os";
-
-interface McpServerEntry {
-  command: string;
-  args?: string[];
-  env?: Record<string, string>;
-  type?: string;
-}
+import type { McpServerEntry } from "./shared.js";
 
 interface ClaudeDesktopConfig {
   mcpServers?: Record<string, McpServerEntry>;
@@ -26,7 +20,7 @@ export function getClaudeConfigPath(): string {
   }
 }
 
-export function wrapWithFlight(servers: Record<string, McpServerEntry>): Record<string, McpServerEntry> {
+export function wrapWithFlight(servers: Record<string, McpServerEntry>, options?: { pd?: boolean }): Record<string, McpServerEntry> {
   const wrapped: Record<string, McpServerEntry> = {};
 
   for (const [name, server] of Object.entries(servers)) {
@@ -41,6 +35,9 @@ export function wrapWithFlight(servers: Record<string, McpServerEntry>): Record<
     }
 
     const args = ["proxy", "--cmd", server.command];
+    if (options?.pd) {
+      args.push("--pd");
+    }
     if (server.args && server.args.length > 0) {
       args.push("--", ...server.args);
     }

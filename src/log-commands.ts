@@ -1,6 +1,5 @@
 import { readdir, readFile, stat, open } from "node:fs/promises";
 import { join } from "node:path";
-import { homedir } from "node:os";
 import { watch, createReadStream } from "node:fs";
 import { createGunzip } from "node:zlib";
 import { pipeline } from "node:stream/promises";
@@ -8,21 +7,8 @@ import { Writable } from "node:stream";
 import type { LogEntry, AlertEntry } from "./logger.js";
 import { getAlertLogPath } from "./logger.js";
 import type { ToolCallEntry } from "./hooks.js";
-
-const DEFAULT_LOG_DIR = join(homedir(), ".flight", "logs");
-
-// --- Colors ---
-
-const C = {
-  reset: "\x1b[0m",
-  dim: "\x1b[2m",
-  red: "\x1b[31m",
-  green: "\x1b[32m",
-  yellow: "\x1b[33m",
-  blue: "\x1b[34m",
-  cyan: "\x1b[36m",
-  white: "\x1b[37m",
-};
+import { DEFAULT_LOG_DIR, C } from "./shared.js";
+import { formatDuration } from "./summary.js";
 
 function statusColor(entry: LogEntry): string {
   if (entry.hallucination_hint) return C.yellow;
@@ -480,6 +466,15 @@ function truncateStr(s: string, max: number): string {
   return s.length > max ? s.slice(0, max - 3) + "..." : s;
 }
 
+function isToolError(output: string): boolean {
+  return (
+    output.includes('"isError":true') ||
+    output.includes('"error":') ||
+    output.startsWith("Error:") ||
+    output.startsWith("error:")
+  );
+}
+
 // --- Audit command (designed for /flight-log slash command) ---
 
 async function resolveCurrentSessionId(): Promise<string | null> {
@@ -506,14 +501,8 @@ function computeAuditStats(entries: ToolCallEntry[]): AuditStats {
   for (const entry of entries) {
     const stats = byTool.get(entry.tool_name) ?? { count: 0, errors: 0 };
     stats.count++;
-    // Detect errors: tool_output containing error indicators
     const output = entry.tool_output ?? "";
-    const isError =
-      output.includes('"isError":true') ||
-      output.includes('"error"') ||
-      output.startsWith("Error:") ||
-      output.startsWith("error:");
-    if (isError) {
+    if (isToolError(output)) {
       stats.errors++;
       errors.push(entry);
     }
@@ -543,9 +532,7 @@ export async function auditSession(sessionId?: string): Promise<void> {
   const firstTs = entries[0].timestamp;
   const lastTs = entries[entries.length - 1].timestamp;
   const durationMs = new Date(lastTs).getTime() - new Date(firstTs).getTime();
-  const durationStr = durationMs > 60000
-    ? `${Math.floor(durationMs / 60000)}m ${Math.floor((durationMs % 60000) / 1000)}s`
-    : `${Math.floor(durationMs / 1000)}s`;
+  const durationStr = formatDuration(durationMs);
 
   console.log(`${C.cyan}━━━ Flight Audit ━━━${C.reset}`);
   console.log(`${C.cyan}Session:${C.reset}  ${sid}`);
@@ -593,12 +580,7 @@ export async function auditSession(sessionId?: string): Promise<void> {
     const tool = entry.tool_name.length > 24 ? entry.tool_name.slice(0, 22) + ".." : entry.tool_name;
     const inputStr = truncateStr(summarizeInput(entry), 58);
     const output = entry.tool_output ?? "";
-    const isError =
-      output.includes('"isError":true') ||
-      output.includes('"error"') ||
-      output.startsWith("Error:") ||
-      output.startsWith("error:");
-    const status = isError
+    const status = isToolError(output)
       ? `${C.red}ERR${C.reset}`
       : `${C.green}OK${C.reset}`;
 
@@ -609,6 +591,69 @@ export async function auditSession(sessionId?: string): Promise<void> {
 
   console.log();
   console.log(`${C.dim}End of audit. ${stats.total} tool calls, ${stats.errors.length} errors.${C.reset}`);
+}
+
+export async function verboseSession(sessionId?: string): Promise<void> {
+  const activeSession = await resolveCurrentSessionId();
+  const resolvedId = sessionId ?? activeSession ?? undefined;
+
+  const entries = await readToolCallsForSession(resolvedId);
+
+  if (entries.length === 0) {
+    console.log("No tool call data found for this session.");
+    console.log("Tool calls are recorded via the PostToolUse hook — make sure Flight is set up.");
+    return;
+  }
+
+  const sid = entries[0].session_id;
+  const stats = computeAuditStats(entries);
+
+  // --- Header ---
+  const firstTs = entries[0].timestamp;
+  const lastTs = entries[entries.length - 1].timestamp;
+  const durationMs = new Date(lastTs).getTime() - new Date(firstTs).getTime();
+  const durationStr = formatDuration(durationMs);
+
+  console.log(`${C.cyan}━━━ Flight Verbose Log ━━━${C.reset}`);
+  console.log(`${C.cyan}Session:${C.reset}  ${sid}`);
+  console.log(`${C.cyan}Duration:${C.reset} ${durationStr} (${formatTime(firstTs)} → ${formatTime(lastTs)})`);
+  console.log(`${C.cyan}Calls:${C.reset}    ${stats.total}`);
+  console.log(`${C.cyan}Errors:${C.reset}   ${stats.errors.length > 0 ? C.red + stats.errors.length + C.reset : "0"}`);
+  console.log();
+
+  // --- Full timeline with complete payloads ---
+  for (let i = 0; i < entries.length; i++) {
+    const entry = entries[i];
+    const time = formatTime(entry.timestamp);
+    const output = entry.tool_output ?? "";
+    const status = isToolError(output)
+      ? `${C.red}ERR${C.reset}`
+      : `${C.green}OK${C.reset}`;
+
+    console.log(`${C.cyan}━━━ #${i + 1} [${time}] ${entry.tool_name} ${status} ━━━${C.reset}`);
+
+    // Full input
+    console.log(`${C.dim}Input:${C.reset}`);
+    if (entry.tool_input !== null && entry.tool_input !== undefined) {
+      console.log(typeof entry.tool_input === "string"
+        ? entry.tool_input
+        : JSON.stringify(entry.tool_input, null, 2));
+    } else {
+      console.log(`${C.dim}(none)${C.reset}`);
+    }
+
+    // Full output
+    console.log(`${C.dim}Output:${C.reset}`);
+    if (output) {
+      console.log(output + (entry.tool_output_truncated ? `\n${C.yellow}[truncated]${C.reset}` : ""));
+    } else {
+      console.log(`${C.dim}(none)${C.reset}`);
+    }
+
+    console.log();
+  }
+
+  console.log(`${C.dim}End of verbose log. ${stats.total} tool calls, ${stats.errors.length} errors.${C.reset}`);
 }
 
 /** Produce a human-readable summary of tool input */

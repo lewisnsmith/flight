@@ -3,7 +3,7 @@ import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
 import { createHash } from "node:crypto";
-import type { JsonRpcMessage } from "./json-rpc.js";
+import { extractToolName, type JsonRpcMessage } from "./json-rpc.js";
 import { compressSchema, estimateTokens } from "./pd-schema.js";
 import { acquireLock, releaseLock } from "./file-lock.js";
 
@@ -121,13 +121,6 @@ export interface PDHandler {
   flushUsageSync(): void;
 }
 
-// Similar to getToolNameFromRequest in retry.ts — kept separate to avoid coupling PD to retry
-function getToolNameFromParams(params: unknown): string | undefined {
-  if (params && typeof params === "object") {
-    return (params as Record<string, unknown>).name as string | undefined;
-  }
-  return undefined;
-}
 
 function computeServerKey(command: string, args: string[]): string {
   const input = `${command} ${args.join(" ")}`.trim().replace(/\/+$/, "");
@@ -401,7 +394,7 @@ export function createPDHandler(options: PDHandlerOptions): PDHandler {
 
       // Track tool usage on response (only when active)
       if (active && originalRequest.method === "tools/call") {
-        const toolName = getToolNameFromParams(originalRequest.params);
+        const toolName = extractToolName(originalRequest);
         if (toolName) {
           handler.recordToolCall(toolName, !!response.error);
           if (handler.isHiddenTool(toolName)) {

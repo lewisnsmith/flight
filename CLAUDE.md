@@ -29,12 +29,13 @@ src/
   hooks.ts             — Claude Code hook installation/removal (SessionStart/End, PostToolUse)
   init.ts              — Claude/Claude Code config file management (wraps mcpServers)
   setup.ts             — interactive setup wizard (wraps servers + installs hooks)
+  shared.ts            — shared constants (DEFAULT_LOG_DIR, C colors, McpServerEntry type)
   summary.ts           — session summary computation
   stats.ts             — usage statistics
   lifecycle.ts         — log compression and garbage collection
   export.ts            — CSV/JSONL export
   replay.ts            — tool call replay from logs
-  log-commands.ts      — CLI subcommands for log inspection (list, tail, view, filter, inspect)
+  log-commands.ts      — CLI subcommands for log inspection (list, tail, view, filter, inspect, audit, verbose)
   index.ts             — public API re-exports
 ```
 
@@ -55,6 +56,11 @@ Installed in `~/.claude/settings.json` by `flight setup`:
 // After:  "command": "flight", "args": ["proxy", "--cmd", "your-server", "--", "--flag"]
 ```
 Only applies to user-configured MCP servers, not plugin-provided ones.
+
+### 3. Slash Commands
+Installed in `~/.claude/commands/` by `flight setup`:
+- **`/flight`** — quick session audit: tool breakdown, errors, patterns (runs `flight log audit`)
+- **`/flight-log`** — comprehensive view: every tool call with full input/output payloads (runs `flight log verbose`)
 
 ### Data Locations
 - `~/.flight/logs/session_*.jsonl` — full JSON-RPC session recordings

@@ -1,10 +1,11 @@
 import { readFile, writeFile, copyFile, mkdir, rm } from "node:fs/promises";
 import { appendFileSync, readFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
-import { homedir } from "node:os";
+
 import { compressOldSessions, garbageCollect } from "./lifecycle.js";
 import { computeSummary, formatSummary } from "./summary.js";
 import { readLogEntriesForSession } from "./log-commands.js";
+import { DEFAULT_LOG_DIR } from "./shared.js";
 
 interface HookEntry {
   type: string;
@@ -148,7 +149,7 @@ export async function handleSessionStart(stdinJson: string, logDir?: string): Pr
   }
 
   const sessionId = input.session_id ?? `session_${Date.now()}`;
-  const dir = logDir ?? join(homedir(), ".flight", "logs");
+  const dir = logDir ?? DEFAULT_LOG_DIR;
   await mkdir(dir, { recursive: true });
 
   const markerPath = join(dir, `.active_session`);
@@ -166,7 +167,7 @@ export async function handleSessionEnd(stdinJson: string, logDir?: string): Prom
   }
 
   const sessionId = input.session_id ?? "unknown";
-  const dir = logDir ?? join(homedir(), ".flight", "logs");
+  const dir = logDir ?? DEFAULT_LOG_DIR;
 
   // Remove active session marker
   const markerPath = join(dir, `.active_session`);
@@ -201,7 +202,7 @@ export function handlePostToolUseSync(stdinJson: string, logDir?: string): strin
     return "[flight] PostToolUse: invalid stdin JSON";
   }
 
-  const dir = logDir ?? join(homedir(), ".flight", "logs");
+  const dir = logDir ?? DEFAULT_LOG_DIR;
   mkdirSync(dir, { recursive: true });
 
   // Resolve session ID: active marker > stdin > fallback

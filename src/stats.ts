@@ -1,4 +1,5 @@
 import type { LogEntry } from "./logger.js";
+import { C } from "./shared.js";
 
 export interface SessionStats {
   sessionId: string;
@@ -44,12 +45,6 @@ export function computeStats(entries: LogEntry[]): SessionStats {
   };
 }
 
-const C = {
-  reset: "\x1b[0m",
-  dim: "\x1b[2m",
-  green: "\x1b[32m",
-  cyan: "\x1b[36m",
-};
 
 export function formatStats(stats: SessionStats): string {
   const lines: string[] = [];

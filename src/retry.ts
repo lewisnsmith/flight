@@ -1,4 +1,4 @@
-import type { JsonRpcMessage } from "./json-rpc.js";
+import { extractToolName, type JsonRpcMessage } from "./json-rpc.js";
 
 // Read-only tool names safe to auto-retry on error
 const SAFE_RETRY_NAMES = new Set([
@@ -23,12 +23,8 @@ function isPermanentError(msg: JsonRpcMessage): boolean {
   return PERMANENT_ERROR_CODES.has(msg.error.code);
 }
 
-export function getToolNameFromRequest(msg: JsonRpcMessage): string | undefined {
-  if (msg.method === "tools/call" && msg.params && typeof msg.params === "object") {
-    return (msg.params as Record<string, unknown>).name as string | undefined;
-  }
-  return undefined;
-}
+/** @deprecated Use extractToolName from json-rpc.ts — kept as re-export for backwards compatibility */
+export const getToolNameFromRequest = extractToolName;
 
 export interface RetryResult {
   /** Whether the retry manager handled this message (caller should not process further) */

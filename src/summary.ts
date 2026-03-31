@@ -1,4 +1,5 @@
 import type { LogEntry } from "./logger.js";
+import { C } from "./shared.js";
 
 export interface SessionSummary {
   sessionId: string;
@@ -70,7 +71,7 @@ export function computeSummary(entries: LogEntry[]): SessionSummary {
   };
 }
 
-function formatDuration(ms: number): string {
+export function formatDuration(ms: number): string {
   const totalSec = Math.floor(ms / 1000);
   const min = Math.floor(totalSec / 60);
   const sec = totalSec % 60;
@@ -78,13 +79,6 @@ function formatDuration(ms: number): string {
   return `${min}m ${sec}s`;
 }
 
-const C = {
-  reset: "\x1b[0m",
-  dim: "\x1b[2m",
-  red: "\x1b[31m",
-  yellow: "\x1b[33m",
-  cyan: "\x1b[36m",
-};
 
 export function formatSummary(summary: SessionSummary): string {
   const lines: string[] = [];

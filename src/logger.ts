@@ -1,9 +1,9 @@
 import { writeFile, appendFile, mkdir, statfs } from "node:fs/promises";
 import { appendFileSync } from "node:fs";
-import { join } from "node:path";
-import { homedir } from "node:os";
+import { join, dirname } from "node:path";
 import { randomUUID } from "node:crypto";
 import { extractToolName, type JsonRpcMessage } from "./json-rpc.js";
+import { DEFAULT_LOG_DIR } from "./shared.js";
 
 export interface LogEntry {
   session_id: string;
@@ -48,8 +48,7 @@ export interface RedactionOptions {
   redactPatterns?: string[];
 }
 
-const DEFAULT_LOG_DIR = join(homedir(), ".flight", "logs");
-const DEFAULT_ALERT_PATH = join(homedir(), ".flight", "alerts.jsonl");
+const DEFAULT_ALERT_PATH = join(dirname(DEFAULT_LOG_DIR), "alerts.jsonl");
 const FLUSH_INTERVAL_MS = 100;
 const MAX_QUEUE_DEPTH = 1000;
 const MIN_DISK_SPACE_BYTES = 100 * 1024 * 1024; // 100MB
@@ -162,9 +161,12 @@ export async function createSessionLogger(logDir?: string, redactionOptions?: Re
     return JSON.stringify(p.arguments ?? "");
   }
 
+  const LOOP_TRACKER_MAX_KEYS = 500;
+
   function checkLoop(toolName: string, params: unknown, now: number, callId: string): void {
     const key = `${toolName}:${computeArgsHash(params)}`;
     let timestamps = loopTracker.get(key);
+    const isNew = !timestamps;
     if (!timestamps) {
       timestamps = [];
       loopTracker.set(key, timestamps);
@@ -177,7 +179,15 @@ export async function createSessionLogger(logDir?: string, redactionOptions?: Re
       timestamps.shift();
     }
 
-    if (timestamps.length >= LOOP_THRESHOLD && timestamps.length === LOOP_THRESHOLD) {
+    // Hard-cap the map: evict oldest-inserted entry when limit is reached.
+    // JS Maps preserve insertion order, so the first key is always the oldest.
+    // This bounds memory regardless of how many unique tool+args combos are active.
+    if (isNew && loopTracker.size > LOOP_TRACKER_MAX_KEYS) {
+      loopTracker.delete(loopTracker.keys().next().value!);
+    }
+
+    // Fire exactly once when the threshold is first crossed
+    if (timestamps.length === LOOP_THRESHOLD) {
       const alert: AlertEntry = {
         timestamp: new Date(now).toISOString(),
         severity: "loop",
