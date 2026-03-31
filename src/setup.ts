@@ -7,10 +7,11 @@ import { installHooks, removeHooks } from "./hooks.js";
 const SLASH_COMMAND_FILENAME = "flight-log.md";
 
 const SLASH_COMMAND_CONTENT = `Run \`flight log audit\` to display a full audit of all tool calls from the current session.
+Also run \`flight stats\` to include token efficiency data.
 
 Read the output carefully. Present a concise summary to the user:
 
-1. **Overview** — total calls, duration, error count
+1. **Overview** — total calls, duration, error count, tokens saved (if PD active)
 2. **Tool breakdown** — which tools were used most, any with errors
 3. **Issues found** — list each error with what went wrong and why (if obvious from the output)
 4. **Patterns** — anything notable: repeated failures, retries, unusual sequences
@@ -18,6 +19,25 @@ Read the output carefully. Present a concise summary to the user:
 If there are errors or suspicious patterns, offer to investigate the specific tool calls or help fix the underlying issues.
 
 If the user asks about a specific tool call, you can run \`flight log tools\` with \`--tool <name>\` to filter, or read the session's \`_tools.jsonl\` file directly from \`~/.flight/logs/\` for full details.
+`;
+
+const SUMMARY_COMMAND_FILENAME = "flight-summary.md";
+
+const SUMMARY_COMMAND_CONTENT = `Run these two commands and combine their output into a single session overview:
+
+1. \`flight log summary\` — session timeline and call breakdown
+2. \`flight stats\` — token efficiency data
+
+Present the results as a single concise summary:
+
+**Session Overview**
+- Duration, total calls, error count, hallucination hints
+- Top tools used (with call counts)
+- Timeline visualization (x = error, ! = hallucination hint)
+- Token efficiency: tokens saved by schema compression (if PD is active), PD phase
+
+If errors occurred, briefly note which tools failed.
+If no sessions are found, explain that sessions are recorded when the flight proxy is running or hooks are installed.
 `;
 
 interface McpServerEntry {
@@ -44,6 +64,7 @@ export interface SetupResult {
   serverNames: string[];
   configBackedUp: boolean;
   slashCommandInstalled: boolean;
+  summaryCommandInstalled: boolean;
 }
 
 export async function runSetup(options: SetupOptions = {}): Promise<SetupResult> {
@@ -101,12 +122,26 @@ export async function runSetup(options: SetupOptions = {}): Promise<SetupResult>
     // Best-effort
   }
 
+  // Install /flight-summary slash command
+  const summaryCommandPath = join(commandsDir, SUMMARY_COMMAND_FILENAME);
+  let summaryCommandInstalled = false;
+  try {
+    const existing = await readFile(summaryCommandPath, "utf-8").catch(() => null);
+    if (existing !== SUMMARY_COMMAND_CONTENT) {
+      await writeFile(summaryCommandPath, SUMMARY_COMMAND_CONTENT);
+      summaryCommandInstalled = true;
+    }
+  } catch {
+    // Best-effort
+  }
+
   return {
     hooksInstalled: hookResult.installed,
     serversWrapped,
     serverNames,
     configBackedUp,
     slashCommandInstalled,
+    summaryCommandInstalled,
   };
 }
 
@@ -133,6 +168,14 @@ export async function runRemove(options: SetupOptions = {}): Promise<{ hooksRemo
   try {
     await rm(commandPath, { force: true });
     slashCommandRemoved = true;
+  } catch {
+    // Already gone
+  }
+
+  // Remove /flight-summary slash command
+  const summaryCommandPath = join(home, ".claude", "commands", SUMMARY_COMMAND_FILENAME);
+  try {
+    await rm(summaryCommandPath, { force: true });
   } catch {
     // Already gone
   }

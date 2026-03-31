@@ -40,7 +40,7 @@ export function wrapWithFlight(servers: Record<string, McpServerEntry>): Record<
       continue;
     }
 
-    const args = ["proxy", "--cmd", server.command];
+    const args = ["proxy", "--pd", "--cmd", server.command];
     if (server.args && server.args.length > 0) {
       args.push("--", ...server.args);
     }
