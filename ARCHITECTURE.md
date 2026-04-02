@@ -1,41 +1,54 @@
 # Flight Architecture
 
-This document describes the internal architecture of Flight, a flight recorder
-for AI coding agents that captures all tool calls (via hooks) and MCP traffic
-(via proxy), with hallucination detection and token optimization.
+This document describes the internal architecture of Flight, an agent
+observability platform that provides structured tracing, audit, and replay
+for AI agent systems. Flight supports multiple ingestion paths: SDK imports,
+HTTP collection, MCP proxy, and Claude Code hooks.
 
 ---
 
 ## 1. System Overview
 
 ```
-                          ~/.flight/logs/
-                          session_*.jsonl
-                               ^
-                               | async write queue
-                               | (NDJSON, 100ms flush)
-                               |
- +--------------+         +----+----------+         +------------------+
- |  MCP Client  |  stdin  |               |  stdin  |  Upstream MCP    |
- |  (Claude     | ------> |  Flight Proxy | ------> |  Server          |
- |   Code)      | <------ |               | <------ |  (filesystem,    |
- |              |  stdout  |  - parse      |  stdout |   postgres, etc) |
- +--------------+         |  - intercept  |         +------------------+
-                          |  - log        |              |
-                          |  - alert      |              | stderr
-                          +----+----------+              |
-                               |                         v
-                               |                  logger.logError()
-                               v
-                          ~/.flight/alerts.jsonl
-                          (hallucination, loop, error)
+ ┌─────────────────────────────────────────────────────────────────┐
+ │  Agent Systems                                                  │
+ │                                                                 │
+ │  ┌──────────┐  ┌──────────┐  ┌──────────────┐  ┌────────────┐ │
+ │  │ TS SDK   │  │ Python   │  │ Claude Code  │  │ MCP Proxy  │ │
+ │  │ (direct) │  │ SDK      │  │ Hooks        │  │ (stdio)    │ │
+ │  └────┬─────┘  └────┬─────┘  └──────┬───────┘  └─────┬──────┘ │
+ └───────┼─────────────┼───────────────┼─────────────────┼────────┘
+         │             │               │                 │
+         │ file I/O    │ HTTP POST     │ file I/O        │ file I/O
+         ▼             ▼               ▼                 ▼
+     ┌─────────────────────────────────────────────────────────┐
+     │                  ~/.flight/logs/                         │
+     │                  session_*.jsonl                         │
+     │                  alerts.jsonl                            │
+     └─────────────────────────────────────────────────────────┘
+                              ▲
+                              │
+                    ┌─────────┴──────────┐
+                    │  flight serve       │
+                    │  (HTTP collector)   │
+                    │  POST /ingest       │
+                    └────────────────────┘
 ```
 
-Flight sits as a transparent STDIO proxy between the MCP client and upstream
-server. It spawns the upstream process as a child, pipes stdin/stdout
-bidirectionally, and writes structured log entries to disk as a side effect.
-The proxy never modifies messages in passthrough mode; it only transforms
-traffic when progressive disclosure is enabled.
+Flight provides four ingestion paths, all writing to the same JSONL format:
+
+- **TypeScript SDK** (`src/sdk.ts`) — wraps `createSessionLogger` for direct
+  file-based logging from TS/JS agents. No network required.
+- **Python SDK** (`sdk/python/`) — buffered HTTP client that posts NDJSON to
+  the Flight collector. Zero external dependencies (stdlib only).
+- **HTTP Collector** (`src/collector.ts`) — `flight serve` runs an HTTP server
+  that accepts `POST /ingest` with NDJSON bodies, routing entries to per-session
+  files. Enables any language to log via HTTP.
+- **MCP Proxy** (`src/proxy.ts`) — transparent STDIO proxy between MCP client
+  and server. Intercepts JSON-RPC traffic for logging, hallucination detection,
+  and optional token optimization.
+- **Claude Code Hooks** — `PostToolUse`, `SessionStart`, `SessionEnd` hooks
+  installed via `flight claude setup`.
 
 ---
 
@@ -208,24 +221,115 @@ Logged per-entry in the `schema_tokens_saved` field when PD rewrites occur.
 
 ---
 
-## 4. Log Schema Reference
+## 4. TypeScript SDK
+
+The TypeScript SDK (`src/sdk.ts`) provides `createFlightClient()` — a
+programmatic API for agents to log events without a proxy. It wraps the
+existing `createSessionLogger` infrastructure, constructing synthetic
+JSON-RPC messages internally to reuse the write queue and file management.
+
+```
+createFlightClient(options)
+    │
+    ├── createSessionLogger(options)  ← reuses existing logger
+    │       │
+    │       └── write queue → appendFile → <session>.jsonl
+    │
+    ├── logToolCall(name, input, output, error)
+    │       → 2 entries: tool_call (request) + tool_result (response)
+    │
+    ├── logAction(action, outcome, metadata)
+    │       → 1 entry: agent_action
+    │
+    ├── logEvaluation(score, labels)
+    │       → 1 entry: evaluation
+    │
+    └── close() / closeSync()
+```
+
+All entries are stamped with `run_id`, `agent_id`, and `model_config` if
+provided at client creation.
+
+---
+
+## 5. HTTP Collector
+
+The HTTP collector (`src/collector.ts`) runs as `flight serve` and accepts
+log entries over HTTP, enabling language-agnostic ingestion.
+
+```
+POST /ingest                          GET /health
+Content-Type: application/x-ndjson    → 200 { "status": "ok", "sessions": N }
+Body: one LogEntry JSON per line
+→ 200 { "accepted": N, "rejected": M }
+```
+
+Implementation details:
+- Uses Node built-in `http.createServer` (no dependencies)
+- Validates required fields (`session_id`, `timestamp`) per line
+- Routes entries to per-session files based on `session_id`
+- Batches writes per session within a single request
+- 10MB body limit with streaming rejection
+- CORS headers for browser-based agents
+- Default port: 4242
+
+---
+
+## 6. Python SDK
+
+The Python SDK (`sdk/python/flight_sdk/`) is a buffered HTTP client with
+zero external dependencies (stdlib only: `urllib.request`, `json`,
+`dataclasses`, `threading`).
+
+```
+FlightClient(endpoint, session_id, run_id, ...)
+    │
+    ├── log_tool_call() → buffer entry
+    ├── log_action()    → buffer entry
+    ├── log_evaluation() → buffer entry
+    │
+    ├── Timer thread (flush_interval=1s)
+    │       └── POST /ingest → flight serve
+    │
+    └── flush() / close()
+        └── POST remaining buffer
+```
+
+Buffering: entries accumulate in memory and flush every `flush_interval`
+seconds or when the buffer reaches `flush_size` entries. On flush failure
+(collector down), entries are re-buffered for the next attempt.
+
+---
+
+## 7. Log Schema Reference
 
 Each line in a session `.jsonl` file is a `LogEntry`:
 
 | Field                 | Type                              | Description                                                  |
 |-----------------------|-----------------------------------|--------------------------------------------------------------|
-| `session_id`          | `string`                          | Unique session identifier (`session_YYYYMMDD_HHMMSS_<uuid>`) |
-| `call_id`             | `string`                          | JSON-RPC `id` (stringified) or random UUID for notifications |
-| `timestamp`           | `string` (ISO 8601)               | Wall-clock time of log entry                                 |
-| `latency_ms`          | `number`                          | Round-trip latency for responses (0 for requests)            |
-| `direction`           | `"client->server" \| "server->client"` | Which direction the message traveled                    |
-| `method`              | `string`                          | JSON-RPC method, or `"response"` for replies                 |
-| `tool_name`           | `string?`                         | Extracted tool name for `tools/call` messages                 |
-| `payload`             | `unknown`                         | Full JSON-RPC message (redacted if configured)               |
-| `error`               | `string?`                         | Error message if the response was an error                   |
-| `hallucination_hint`  | `boolean?`                        | True if client proceeded after error without retrying        |
-| `pd_active`           | `boolean`                         | Whether progressive disclosure was active                    |
-| `schema_tokens_saved` | `number?`                         | Estimated tokens saved by PD (on rewrite entries only)       |
+| Field                 | Type                              | Required | Description                                           |
+|-----------------------|-----------------------------------|:--------:|-------------------------------------------------------|
+| `session_id`          | `string`                          | **yes**  | Unique session identifier                             |
+| `timestamp`           | `string` (ISO 8601)               | **yes**  | Wall-clock time of log entry                          |
+| `event_type`          | `string`                          | **yes**  | `tool_call`, `tool_result`, `agent_action`, `evaluation`, `lifecycle` |
+| `call_id`             | `string?`                         |          | JSON-RPC `id` or random UUID                          |
+| `latency_ms`          | `number?`                         |          | Round-trip latency for responses                      |
+| `direction`           | `string?`                         |          | `"client->server"` or `"server->client"`              |
+| `method`              | `string?`                         |          | JSON-RPC method, or `"response"` for replies          |
+| `tool_name`           | `string?`                         |          | Extracted tool name for `tools/call` messages          |
+| `payload`             | `unknown?`                        |          | Full message payload (redacted if configured)          |
+| `error`               | `string?`                         |          | Error message if the response was an error             |
+| `run_id`              | `string?`                         |          | Groups related sessions (e.g., an experiment run)      |
+| `agent_id`            | `string?`                         |          | Identifies which agent in a multi-agent system         |
+| `model_config`        | `object?`                         |          | Model, quantization, provider, temperature             |
+| `chosen_action`       | `string?`                         |          | The action the agent decided to take                   |
+| `execution_outcome`   | `string?`                         |          | Result classification (success, failure, partial)      |
+| `evaluator_score`     | `number?`                         |          | Score from an evaluation function                      |
+| `labels`              | `Record<string,string>?`          |          | Post-hoc labels for analysis                           |
+| `metadata`            | `Record<string,unknown>?`         |          | Arbitrary extra context                                |
+| `hallucination_hint`  | `boolean?`                        |          | True if client proceeded after error without retrying  |
+| `pd_active`           | `boolean?`                        |          | Whether progressive disclosure was active              |
+| `schema_tokens_saved` | `number?`                         |          | Estimated tokens saved by PD                           |
 
 ### Alert Entries (alerts.jsonl)
 
@@ -243,7 +347,7 @@ Alerts are also appended to `~/.flight/alerts.jsonl`:
 
 ---
 
-## 5. Alert System
+## 8. Alert System
 
 The proxy emits three types of real-time alerts, written to
 `~/.flight/alerts.jsonl` and optionally displayed on stderr.
@@ -292,7 +396,7 @@ retry result are logged.
 
 ---
 
-## 6. Log Lifecycle
+## 9. Log Lifecycle
 
 ```
 Active session
@@ -341,7 +445,7 @@ Oldest sessions deleted (FIFO)
 
 ---
 
-## 7. Key Design Decisions
+## 10. Key Design Decisions
 
 ### Why STDIO (not HTTP)
 

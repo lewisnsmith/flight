@@ -2,51 +2,100 @@
 
 # Flight
 
-**A flight recorder for AI coding agents — captures every tool call, detects hallucinations, and optimizes tokens.**
+**Agent observability platform — structured tracing, audit, and replay for AI agent systems.**
 
-Flight records everything your AI agent does: every file read, shell command, grep, edit, and MCP server interaction. It works through two complementary mechanisms:
+Flight records everything your AI agents do: tool calls, decisions, evaluation scores, and outcomes. It works through multiple ingestion paths, supporting any agent framework:
 
 ```
-┌─────────────────────────────────────────────────────────┐
-│  Claude Code                                            │
-│                                                         │
-│  Read, Write, Edit, Bash, Grep, Glob, ...               │
-│       │                                                 │
-│       │  hooks (PostToolUse)        MCP calls (stdio)   │
-│       ▼                                  │              │
-│  <session>_tools.jsonl                   │              │
-└──────────────────────────────────────────┼──────────────┘
-                                           │
-                                           ▼
-                                   ┌───────────────┐
-                                   │ Flight Proxy   │──► session_*.jsonl
-                                   │ - Intercept    │──► alerts.jsonl
-                                   │ - Compress     │──► hallucination hints
-                                   └───────┬───────┘
-                                           │ stdio
-                                           ▼
-                                   ┌───────────────┐
-                                   │ MCP Server     │
-                                   └───────────────┘
+┌──────────────────────────────────────────────────────────────────┐
+│  Your Agent (Python, TypeScript, or any language)                │
+│                                                                  │
+│  ┌─────────────┐   ┌──────────────┐   ┌───────────────────────┐ │
+│  │  Python SDK  │   │   TS SDK     │   │  Claude Code Hooks    │ │
+│  │  (HTTP POST) │   │  (direct I/O)│   │  (PostToolUse, etc.)  │ │
+│  └──────┬──────┘   └──────┬───────┘   └──────────┬────────────┘ │
+│         │                  │                      │              │
+└─────────┼──────────────────┼──────────────────────┼──────────────┘
+          │                  │                      │
+          ▼                  ▼                      ▼
+   ┌─────────────┐    ~/.flight/logs/        <session>_tools.jsonl
+   │ flight serve │         ▲
+   │ (HTTP        │─────────┘          ┌───────────────┐
+   │  collector)  │                    │ Flight Proxy   │──► session_*.jsonl
+   └─────────────┘                    │ (MCP stdio)    │──► alerts.jsonl
+                                      └───────┬───────┘
+                                              │ stdio
+                                              ▼
+                                      ┌───────────────┐
+                                      │ MCP Server     │
+                                      └───────────────┘
 ```
 
-**Hooks** capture all tool calls (built-in and MCP) — installed via `flight setup` into Claude Code's hook system. **Proxy wrapping** adds full JSON-RPC traffic recording and token optimization for MCP servers.
+**Four ingestion paths:**
+- **TypeScript SDK** — `createFlightClient()` for direct logging from TS/JS agents
+- **Python SDK** — `FlightClient` for Python agents, posts to the HTTP collector
+- **HTTP Collector** — `flight serve` accepts NDJSON over HTTP from any language
+- **MCP Proxy** — transparent stdio proxy for full JSON-RPC traffic recording
+- **Claude Code Hooks** — captures all tool calls via Claude Code's hook system
 
-Together, they give you a complete, structured record of every action your agent takes — the raw material for studying hallucinations, tool-calling patterns, and failure modes.
+Together, they produce structured, analyzable JSONL records of every action your agents take.
 
 ---
 
 ## Origin
 
-During the **MathWorks M3 competition**, I leaned on AI assistants for brainstorming and data lookup — only to discover, too late, that many of the "facts" and numerical results were hallucinated. The model produced confident, statistically formatted outputs. There was no way to inspect what it had actually done. Tool calls and data sources were opaque.
+During the **MathWorks M3 competition**, I leaned on AI assistants for brainstorming and data lookup — only to discover, too late, that many of the "facts" and numerical results were hallucinated. The model produced confident, statistically formatted outputs. There was no way to inspect what it had actually done.
 
-That frustration directly led to Flight.
-
-The M3 experience exposed a structural problem: AI systems producing confident but incorrect statements, with no ground-truth trace. Without a record of every tool call, response, and error, hallucinations can't be studied — they can only be discovered after the damage is done. Flight is my attempt to build the missing instrumentation layer. It turns opaque agent runs into **structured, analyzable records** — the raw material for empirically studying agent behavior instead of treating failures as mysterious.
+That frustration directly led to Flight. It turns opaque agent runs into **structured, analyzable records** — the raw material for empirically studying agent behavior instead of treating failures as mysterious.
 
 ---
 
 ## Quick Start
+
+### TypeScript SDK
+
+```typescript
+import { createFlightClient } from "flight-proxy";
+
+const flight = await createFlightClient({
+  runId: "experiment-42",
+  agentId: "my-agent",
+  modelConfig: { model: "claude-sonnet-4-20250514", provider: "anthropic" },
+});
+
+// Log tool calls, actions, and evaluations
+flight.logToolCall("search_web", { query: "AAPL price" }, { price: 187.5 });
+flight.logAction("buy_stock", "success", { ticker: "AAPL", quantity: 10 });
+flight.logEvaluation(0.85, { task: "portfolio_rebalance" });
+
+await flight.close();
+```
+
+### Python SDK
+
+```bash
+# Start the collector
+flight serve --port 4242
+
+# In your Python agent:
+pip install flight-sdk  # or: pip install -e sdk/python/
+```
+
+```python
+from flight_sdk import FlightClient, ModelConfig
+
+with FlightClient(
+    endpoint="http://localhost:4242",
+    run_id="experiment-42",
+    agent_id="my-agent",
+    model_config=ModelConfig(model="llama-3-8b", quantization="gptq-4bit"),
+) as flight:
+    flight.log_tool_call("search_db", {"query": "SELECT *"}, {"rows": 42})
+    flight.log_action("decide", "hold", {"reason": "insufficient data"})
+    flight.log_evaluation(0.72, labels={"task": "data_analysis"})
+```
+
+### Claude Code Integration
 
 ```bash
 # Install from source
@@ -54,11 +103,11 @@ git clone https://github.com/lewisnsmith/flight.git
 cd flight && npm install && npm run build && npm link
 
 # Interactive setup — installs hooks + optionally wraps MCP servers
-flight setup
+flight claude setup
 
 # Or step by step:
-flight hooks install              # Record all tool calls via hooks
-flight init claude-code --apply   # Also wrap MCP servers for full traffic recording
+flight claude hooks install           # Record all tool calls via hooks
+flight claude init code --apply       # Wrap MCP servers for full traffic recording
 
 # Start a Claude Code session — Flight records automatically
 # Then inspect what happened:
@@ -77,127 +126,72 @@ flight log tail
 
 ---
 
-## What Gets Recorded
+## Log Schema
 
-| Source | What's captured | Log file |
-|--------|----------------|----------|
-| **Hooks** (all tools) | Tool name, arguments, timing, session context | `<session>_tools.jsonl` |
-| **MCP Proxy** (wrapped servers) | Full JSON-RPC request/response payloads, latency, errors | `session_*.jsonl` |
-| **Alert detection** | Hallucination hints, error loops, repeated failures | `alerts.jsonl` |
+Every `.jsonl` session file uses a flexible schema. Only `session_id`, `timestamp`, and `event_type` are required — all other fields are optional:
 
-Hooks are lightweight metadata; the proxy captures full payloads. Use both together for complete coverage.
-
----
-
-## Debug a Hallucinated File Write
-
-Claude claims it created `auth.ts`, but the file doesn't exist:
-
-```bash
-$ flight log tail
-[14:02:11] ↑ mcp  tools/call/write_file
-[14:02:12] ↓ mcp  tools/call ERROR: Permission denied
-[14:02:14] ↑ mcp  tools/call/read_file ⚠ HALLUCINATION HINT
-
-$ flight log inspect <call-id>
-Session:   session_20260315_140200
-Call ID:   2
-Direction: server->client
-Method:    response
-Latency:   12ms
-Error:     Permission denied
-
---- Payload ---
+```json
 {
-  "jsonrpc": "2.0",
-  "id": 2,
-  "error": { "code": -32000, "message": "Permission denied" }
+  "session_id": "session_20260315_142201",
+  "timestamp": "2026-03-15T14:02:11.421Z",
+  "event_type": "tool_call",
+  "call_id": "2",
+  "direction": "server->client",
+  "method": "tools/call",
+  "tool_name": "write_file",
+  "latency_ms": 12,
+  "error": "Permission denied",
+  "run_id": "experiment-42",
+  "agent_id": "heuristic-agent-1",
+  "model_config": { "model": "claude-sonnet-4-20250514", "provider": "anthropic" },
+  "chosen_action": "write_config",
+  "execution_outcome": "failure",
+  "evaluator_score": 0.3,
+  "labels": { "domain": "devops" },
+  "metadata": { "retry_count": 2 }
 }
 ```
 
-> **Note:** `hallucination_hint` is a heuristic — it flags when the client proceeds after a server error without retrying. It does not catch fabricated data in successful responses, wrong-but-successful arguments, or reasoning hallucinations that bypass tools entirely. Treat hints as investigative leads, not verdicts.
+**Event types:** `tool_call`, `tool_result`, `agent_action`, `evaluation`, `lifecycle`
 
 ---
 
 ## CLI Reference
 
 ```bash
-# Setup & configuration
-flight setup                        # Interactive setup wizard (hooks + MCP wrapping)
-flight hooks install                # Install Claude Code hooks (records all tool calls)
-flight hooks remove                 # Remove hooks
-flight init claude                  # Discover and wrap Claude Desktop MCP servers
-flight init claude --apply          # Apply directly (backs up original)
-flight init claude-code --apply     # Wrap Claude Code MCP servers
+# HTTP Collector
+flight serve [--port 4242] [--log-dir ~/.flight/logs]
 
-# Proxy
-flight proxy --cmd <server> -- <args>  # Run proxy manually
-flight proxy --cmd <server> --pd       # With progressive disclosure enabled
+# MCP Proxy
+flight proxy --cmd <server> -- <args>
+flight proxy --cmd <server> --pd           # With progressive disclosure
 
 # Log inspection
-flight log list                     # List all sessions (ID, date, calls, errors)
+flight log list                     # List all sessions
 flight log tail [--session <id>]    # Live stream a session
 flight log view <session>           # Full timeline with summary
 flight log filter --tool <name>     # Filter by tool name
 flight log filter --errors          # Show only failed calls
 flight log filter --hallucinations  # Show hallucination hints
-flight log inspect <call-id>        # Pretty-print full request/response payload
-flight log alerts                   # Show hallucination/loop/error alerts
+flight log inspect <call-id>        # Full request/response payload
+flight log alerts                   # Hallucination/loop/error alerts
 flight log summary [--session <id>] # Session summary statistics
 flight log tools                    # Tool call frequency breakdown
+flight log stats                    # Usage statistics across sessions
+flight log export --format csv      # Export session data as CSV
+flight log export --format jsonl    # Export as JSONL
+flight log replay <session>         # Replay tool calls from a session
+flight log gc                       # Compress old sessions, collect garbage
 flight log prune --before <date>    # Delete sessions before a date
-flight log prune --keep <n>         # Keep only the N most recent sessions
+flight log prune --keep <n>         # Keep only N most recent sessions
 
-# Analysis & export
-flight stats                        # Usage statistics across sessions
-flight export --format csv          # Export session data as CSV
-flight export --format jsonl        # Export session data as JSONL
-flight replay <session>             # Replay tool calls from a recorded session
-```
-
----
-
-## Research Use
-
-Every `.jsonl` session file is a structured dataset:
-
-```json
-{
-  "session_id": "session_20260315_142201",
-  "call_id": "2",
-  "timestamp": "2026-03-15T14:02:11.421Z",
-  "direction": "server->client",
-  "method": "tools/call",
-  "tool_name": "write_file",
-  "latency_ms": 12,
-  "error": "Permission denied",
-  "hallucination_hint": true,
-  "pd_active": false
-}
-```
-
-**What you can study:**
-
-- **Hallucination rate by tool** — which tools produce the most proceed-after-error patterns?
-- **Tool-calling policy modeling** — how does the agent sequence tool calls?
-- **Latency and error correlation** — do high-latency calls predict downstream failures?
-
-**Extract all hallucination hints:**
-```bash
-jq 'select(.hallucination_hint == true)' ~/.flight/logs/session_*.jsonl
-```
-
-**Analyze with Python:**
-```python
-import json, pathlib
-
-entries = []
-for line in pathlib.Path("~/.flight/logs/session_abc.jsonl").expanduser().read_text().splitlines():
-    entries.append(json.loads(line))
-
-errors = [e for e in entries if e.get("error")]
-hints = [e for e in entries if e.get("hallucination_hint")]
-print(f"Calls: {len(entries)}, Errors: {len(errors)}, Hallucination hints: {len(hints)}")
+# Claude Code integration
+flight claude setup                 # Interactive setup wizard
+flight claude hooks install         # Install Claude Code hooks
+flight claude hooks remove          # Remove hooks
+flight claude init desktop          # Discover and wrap Claude Desktop MCP servers
+flight claude init desktop --apply  # Apply directly (backs up original)
+flight claude init code --apply     # Wrap Claude Code MCP servers
 ```
 
 ---
@@ -206,17 +200,18 @@ print(f"Calls: {len(entries)}, Errors: {len(errors)}, Hallucination hints: {len(
 
 | Feature | Status |
 |---------|:------:|
-| Claude Code hooks (all tool calls) | ✅ |
+| TypeScript SDK (direct logging) | ✅ |
+| Python SDK (HTTP client) | ✅ |
+| HTTP collector (`flight serve`) | ✅ |
 | MCP proxy (full JSON-RPC traffic) | ✅ |
-| `.jsonl` session logging | ✅ |
+| Claude Code hooks (all tool calls) | ✅ |
+| `.jsonl` structured session logging | ✅ |
+| Flexible schema (run_id, agent_id, model_config, etc.) | ✅ |
 | Hallucination hint detection | ✅ |
-| `flight init` (MCP config discovery) | ✅ |
 | Secret redaction | ✅ |
-| `flight log` CLI (list, tail, view, filter, inspect) | ✅ |
 | Progressive disclosure (token optimization) | ✅ |
 | Replay functionality | ✅ |
 | CSV/JSONL export | ✅ |
-| Token savings metrics | ✅ |
 | Log compression + lifecycle | ✅ |
 | Auto-retry for transient errors | ✅ |
 | Interactive setup wizard | ✅ |
@@ -230,7 +225,6 @@ print(f"Calls: {len(entries)}, Errors: {len(errors)}, Hallucination hints: {len(
 - **40,000+ calls/sec** sustained throughput ([benchmarked](./bench/throughput.ts))
 - **Backpressure-aware:** proxy never accumulates unbounded in-memory buffers
 - **Disk-safe:** disables logging gracefully if free space drops below 100MB
-- **Write queue:** 1,000 entries max; drops with warning under disk pressure, never stalls the proxy
 
 ---
 
@@ -244,14 +238,41 @@ print(f"Calls: {len(entries)}, Errors: {len(errors)}, Hallucination hints: {len(
 
 ---
 
+## Research Use
+
+```python
+import json, pathlib
+
+entries = []
+for line in pathlib.Path("~/.flight/logs/session_abc.jsonl").expanduser().read_text().splitlines():
+    entries.append(json.loads(line))
+
+errors = [e for e in entries if e.get("error")]
+hints = [e for e in entries if e.get("hallucination_hint")]
+actions = [e for e in entries if e.get("event_type") == "agent_action"]
+evals = [e for e in entries if e.get("evaluator_score") is not None]
+
+print(f"Calls: {len(entries)}, Errors: {len(errors)}, Actions: {len(actions)}, Evals: {len(evals)}")
+```
+
+**What you can study:**
+
+- **Hallucination rate by tool** — which tools produce the most proceed-after-error patterns?
+- **Agent decision quality** — correlate `chosen_action` with `execution_outcome` and `evaluator_score`
+- **Model comparison** — compare `model_config` variants across runs using `run_id`
+- **Multi-agent coordination** — trace `agent_id` interactions within shared sessions
+- **Tool-calling policy modeling** — how does the agent sequence tool calls?
+
+---
+
 ## Related Work
 
-| Tool | Terminal | Offline | Open Source | All Tool Calls | Token Optimization | Research-Grade Logs |
-|------|:--------:|:-------:|:-----------:|:--------------:|:-----------------:|:-------------------:|
+| Tool | Terminal | Offline | Open Source | Multi-Agent | Token Optimization | Research-Grade Logs |
+|------|:--------:|:-------:|:-----------:|:-----------:|:-----------------:|:-------------------:|
 | **Flight** | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | Reticle | ✅ | ✅ | ✅ | — | — | — |
 | MCP Inspector | — (browser) | ✅ | ✅ | — | — | — |
-| Langfuse/Moesif | — | — | partial | — | — | — |
+| Langfuse/Moesif | — | — | partial | partial | — | — |
 
 ---
 
@@ -260,15 +281,20 @@ print(f"Calls: {len(entries)}, Errors: {len(errors)}, Hallucination hints: {len(
 ```bash
 git clone https://github.com/lewisnsmith/flight.git
 cd flight && npm install && npm run build && npm link
-flight init claude
 ```
 
 Requires Node.js 20+. No database, no cloud, no external dependencies.
+
+For the Python SDK:
+```bash
+pip install -e sdk/python/
+```
 
 ---
 
 ## Documentation
 
+- [`ARCHITECTURE.md`](./ARCHITECTURE.md) — internal architecture and design decisions
 - [`docs/flight-prd.md`](./docs/flight-prd.md) — full product requirements document
 - [`docs/plan.md`](./docs/plan.md) — sprint plan and roadmap
 - [`docs/CHANGELOG.md`](./docs/CHANGELOG.md) — iteration history

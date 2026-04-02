@@ -1,7 +1,7 @@
 {
   "name": "flight-proxy",
   "version": "1.3.1",
-  "description": "Flight recorder for AI coding agents — captures every tool call, detects hallucinations, optimizes tokens",
+  "description": "Agent observability platform — structured tracing, audit, and replay for AI agent systems",
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -20,14 +20,15 @@
     "prepublishOnly": "npm run build"
   },
   "keywords": [
-    "mcp",
-    "proxy",
-    "ai",
-    "claude",
-    "debugging",
+    "agent",
     "observability",
-    "hallucination",
+    "tracing",
+    "audit",
+    "multi-agent",
+    "mcp",
+    "ai",
     "tool-calling",
+    "hallucination",
     "flight-recorder"
   ],
   "author": "Lewis Smith",
