@@ -5,10 +5,24 @@ import { randomUUID } from "node:crypto";
 import { extractToolName, type JsonRpcMessage } from "./json-rpc.js";
 import { DEFAULT_LOG_DIR } from "./shared.js";
 
+export type EventType = "tool_call" | "tool_result" | "agent_action" | "evaluation" | "lifecycle";
+
+export interface ModelConfig {
+  model: string;
+  quantization?: string;
+  provider?: string;
+  temperature?: number;
+  [key: string]: unknown;
+}
+
 export interface LogEntry {
+  // Core fields
   session_id: string;
   call_id: string;
   timestamp: string;
+  event_type?: EventType;
+
+  // MCP proxy fields
   latency_ms: number;
   direction: "client->server" | "server->client";
   method: string;
@@ -16,10 +30,24 @@ export interface LogEntry {
   payload: unknown;
   error?: string;
   hallucination_hint?: boolean;
+
+  // Progressive disclosure fields
   pd_active: boolean;
   schema_tokens_saved?: number;
   pd_phase?: 1 | 2 | 3;
   pd_tool_hidden?: boolean;
+
+  // Agent observability fields
+  run_id?: string;
+  agent_id?: string;
+  prompt_hash?: string;
+  model_config?: ModelConfig;
+  chosen_action?: string;
+  execution_outcome?: string;
+  validation_failures?: string[];
+  evaluator_score?: number;
+  labels?: Record<string, string>;
+  metadata?: Record<string, unknown>;
 }
 
 export interface AlertEntry {
@@ -103,10 +131,22 @@ export function getAlertLogPath(): string {
   return DEFAULT_ALERT_PATH;
 }
 
-export async function createSessionLogger(logDir?: string, redactionOptions?: RedactionOptions): Promise<SessionLogger> {
-  const dir = logDir ?? DEFAULT_LOG_DIR;
-  const redact = buildRedactor(redactionOptions);
-  const sessionId = `session_${formatTimestamp(new Date())}_${randomUUID().slice(0, 8)}`;
+export interface SessionLoggerOptions {
+  logDir?: string;
+  redaction?: RedactionOptions;
+  runId?: string;
+  agentId?: string;
+  modelConfig?: ModelConfig;
+  sessionId?: string;
+}
+
+export async function createSessionLogger(logDirOrOptions?: string | SessionLoggerOptions, redactionOptions?: RedactionOptions): Promise<SessionLogger> {
+  const opts: SessionLoggerOptions = typeof logDirOrOptions === "string"
+    ? { logDir: logDirOrOptions, redaction: redactionOptions }
+    : logDirOrOptions ?? {};
+  const dir = opts.logDir ?? DEFAULT_LOG_DIR;
+  const redact = buildRedactor(opts.redaction ?? redactionOptions);
+  const sessionId = opts.sessionId ?? `session_${formatTimestamp(new Date())}_${randomUUID().slice(0, 8)}`;
   const logPath = join(dir, `${sessionId}.jsonl`);
 
   await mkdir(dir, { recursive: true });
@@ -315,6 +355,7 @@ export async function createSessionLogger(logDir?: string, redactionOptions?: Re
         session_id: sessionId,
         call_id: callId,
         timestamp: new Date(now).toISOString(),
+        event_type: direction === "server->client" ? "tool_result" : "tool_call",
         latency_ms: latencyMs,
         direction,
         method: msg.method ?? (msg.result !== undefined || msg.error !== undefined ? "response" : "unknown"),
@@ -326,6 +367,9 @@ export async function createSessionLogger(logDir?: string, redactionOptions?: Re
         schema_tokens_saved: extraFields?.schema_tokens_saved,
         pd_phase: extraFields?.pd_phase,
         pd_tool_hidden: extraFields?.pd_tool_hidden,
+        ...(opts.runId && { run_id: opts.runId }),
+        ...(opts.agentId && { agent_id: opts.agentId }),
+        ...(opts.modelConfig && { model_config: opts.modelConfig }),
       };
 
       enqueue(redact(JSON.stringify(entry)));
@@ -364,12 +408,15 @@ export async function createSessionLogger(logDir?: string, redactionOptions?: Re
         session_id: sessionId,
         call_id: randomUUID(),
         timestamp: new Date().toISOString(),
+        event_type: "lifecycle",
         latency_ms: 0,
         direction: "server->client",
         method: source,
         payload: { error: message },
         error: message,
         pd_active: logger.pdActive,
+        ...(opts.runId && { run_id: opts.runId }),
+        ...(opts.agentId && { agent_id: opts.agentId }),
       };
       enqueue(redact(JSON.stringify(entry)));
     },
