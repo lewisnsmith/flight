@@ -13,6 +13,7 @@ import { handleSessionStart, handleSessionEnd, handlePostToolUseSync } from "./h
 import { compressOldSessions, garbageCollect, pruneSessions } from "./lifecycle.js";
 import { computeStats, computeAggregateStats, formatStats, formatAggregateStats } from "./stats.js";
 import { findCallRequest, replayCall } from "./replay.js";
+import { startCollector } from "./collector.js";
 
 const require = createRequire(import.meta.url);
 const pkg = require("../package.json") as { version: string };
@@ -21,7 +22,7 @@ const program = new Command();
 
 program
   .name("flight")
-  .description("MCP flight recorder and token optimizer for AI coding agents")
+  .description("Agent observability platform — structured tracing, audit, and replay for AI agent systems")
   .version(pkg.version)
   .option("--no-banner", "Suppress the pixel-art banner");
 
@@ -31,6 +32,17 @@ function banner(command: string, opts: { toStderr?: boolean } = {}): void {
   if (root.banner === false) return;
   printBanner(command, opts);
 }
+
+// Helper: print deprecation notice and delegate
+function deprecated(oldCmd: string, newCmd: string): () => void {
+  return () => {
+    process.stderr.write(`\x1b[33m[flight] "${oldCmd}" is deprecated. Use "${newCmd}" instead.\x1b[0m\n`);
+  };
+}
+
+// ============================================================
+// Top-level commands (agent-generic)
+// ============================================================
 
 program
   .command("proxy")
@@ -54,64 +66,33 @@ program
   });
 
 program
-  .command("init")
-  .argument("<target>", 'Target to initialize ("claude" or "claude-code")')
-  .option("--apply", "Overwrite config in place (backs up original to .bak)")
-  .option("--scope <scope>", "Config scope for claude-code: user or project", "user")
-  .description("Generate config for a target MCP client")
-  .action(async (target: string, options: { apply?: boolean; scope?: string }) => {
-    banner("init");
-    if (target === "claude") {
-      const result = await initClaude({ apply: options.apply });
+  .command("serve")
+  .description("Start the HTTP collector server for ingesting agent logs")
+  .option("--port <port>", "Port to listen on", "4242")
+  .option("--log-dir <dir>", "Log directory")
+  .action(async (options: { port?: string; logDir?: string }) => {
+    banner("serve");
+    const port = parseInt(options.port ?? "4242", 10);
+    const collector = await startCollector({ port, logDir: options.logDir });
+    console.log(`\x1b[32m✓\x1b[0m Flight collector listening on http://localhost:${collector.port}`);
+    console.log(`  POST /ingest  — send NDJSON log entries`);
+    console.log(`  GET  /health  — health check`);
+    console.log(`\n\x1b[2mPress Ctrl+C to stop\x1b[0m`);
 
-      if (result.configFound) {
-        console.log(`\x1b[32m✓\x1b[0m Found existing config: ${getClaudeConfigPath()}`);
-        console.log(`\x1b[32m✓\x1b[0m Discovered ${result.serverCount} MCP server(s): ${result.serverNames.join(", ")}`);
-      } else {
-        console.log(`\x1b[33m!\x1b[0m No existing config found. Generated example snippet.`);
-      }
-
-      if (result.applied) {
-        console.log(`\x1b[32m✓\x1b[0m Config applied to: ${result.outputPath}`);
-        console.log(`  Backup saved to: ${result.outputPath}.bak`);
-      } else {
-        console.log(`\x1b[32m✓\x1b[0m Wrapped config written to: ${result.outputPath}`);
-        console.log(`  Review and merge into your claude_desktop_config.json, or run:`);
-        console.log(`  \x1b[36mflight init claude --apply\x1b[0m`);
-      }
-    } else if (target === "claude-code") {
-      const scope = (options.scope === "project" ? "project" : "user") as "user" | "project";
-      const result = await initClaudeCode({ apply: options.apply, scope });
-      const configPath = getClaudeCodeConfigPath(scope);
-
-      if (result.configFound) {
-        console.log(`\x1b[32m✓\x1b[0m Found existing config: ${configPath}`);
-        console.log(`\x1b[32m✓\x1b[0m Discovered ${result.serverCount} MCP server(s): ${result.serverNames.join(", ")}`);
-      } else {
-        console.log(`\x1b[33m!\x1b[0m No existing config found. Generated example snippet.`);
-      }
-
-      if (result.applied) {
-        console.log(`\x1b[32m✓\x1b[0m Config applied to: ${result.outputPath}`);
-        console.log(`  Backup saved to: ${result.outputPath}.bak`);
-      } else {
-        console.log(`\x1b[32m✓\x1b[0m Wrapped config written to: ${result.outputPath}`);
-        if (result.commands && result.commands.length > 0) {
-          console.log(`\n  Or run these commands to add servers individually:\n`);
-          for (const cmd of result.commands) {
-            console.log(`  \x1b[36m${cmd}\x1b[0m`);
-          }
-        }
-      }
-    } else {
-      console.error(`Unknown target: ${target}. Supported: claude, claude-code`);
-      process.exit(1);
-    }
+    const shutdown = async () => {
+      console.log(`\n\x1b[33m!\x1b[0m Shutting down...`);
+      await collector.close();
+      process.exit(0);
+    };
+    process.on("SIGINT", shutdown);
+    process.on("SIGTERM", shutdown);
   });
 
-// --- Log commands ---
+// ============================================================
+// Log commands — inspection, analysis, export, replay
+// ============================================================
 
-const log = program.command("log").description("Inspect recorded sessions");
+const log = program.command("log").description("Inspect, analyze, and export recorded sessions");
 
 log
   .command("list")
@@ -203,7 +184,7 @@ log
 log
   .command("audit")
   .argument("[session]", "Session ID (default: current active session)")
-  .description("Rich audit view of tool calls for a session (used by /flight-log)")
+  .description("Rich audit view of tool calls for a session")
   .action(async (session?: string) => {
     banner("log audit");
     await auditSession(session);
@@ -274,9 +255,9 @@ log
     }
   });
 
-// --- Export command ---
+// --- Moved under log: export, stats, replay ---
 
-program
+log
   .command("export")
   .argument("[session]", "Session ID (default: most recent)")
   .requiredOption("--format <format>", "Export format: csv or jsonl")
@@ -287,7 +268,6 @@ program
   .option("--hallucinations", "Include only entries with hallucination hints")
   .description("Export session logs to CSV or JSONL")
   .action(async (session: string | undefined, options: { format: string; output?: string; includePayload?: boolean; tool?: string; errors?: boolean; hallucinations?: boolean }) => {
-    // Only show banner when writing to a file — stdout export is a data stream
     if (options.output) banner("export");
     let entries = await readLogEntriesForSession(session);
 
@@ -325,9 +305,7 @@ program
     }
   });
 
-// --- Stats command ---
-
-program
+log
   .command("stats")
   .argument("[session]", "Session ID (default: most recent, omit for aggregate)")
   .description("Show token savings and call statistics")
@@ -352,9 +330,7 @@ program
     }
   });
 
-// --- Replay command ---
-
-program
+log
   .command("replay")
   .argument("<call-id>", "Call ID to replay (prefix match)")
   .requiredOption("--cmd <command>", "Upstream MCP server command to replay against")
@@ -413,11 +389,74 @@ program
     }
   });
 
-// --- Setup command ---
+// ============================================================
+// Claude Code integration commands
+// ============================================================
 
-program
+const claude = program.command("claude").description("Claude Code / Claude Desktop integration");
+
+const claudeInit = claude.command("init").description("Configure MCP server wrapping");
+
+claudeInit
+  .command("desktop")
+  .option("--apply", "Overwrite config in place (backs up original to .bak)")
+  .description("Wrap Claude Desktop MCP servers with Flight proxy")
+  .action(async (options: { apply?: boolean }) => {
+    banner("init");
+    const result = await initClaude({ apply: options.apply });
+
+    if (result.configFound) {
+      console.log(`\x1b[32m✓\x1b[0m Found existing config: ${getClaudeConfigPath()}`);
+      console.log(`\x1b[32m✓\x1b[0m Discovered ${result.serverCount} MCP server(s): ${result.serverNames.join(", ")}`);
+    } else {
+      console.log(`\x1b[33m!\x1b[0m No existing config found. Generated example snippet.`);
+    }
+
+    if (result.applied) {
+      console.log(`\x1b[32m✓\x1b[0m Config applied to: ${result.outputPath}`);
+      console.log(`  Backup saved to: ${result.outputPath}.bak`);
+    } else {
+      console.log(`\x1b[32m✓\x1b[0m Wrapped config written to: ${result.outputPath}`);
+      console.log(`  Review and merge into your claude_desktop_config.json, or run:`);
+      console.log(`  \x1b[36mflight claude init desktop --apply\x1b[0m`);
+    }
+  });
+
+claudeInit
+  .command("code")
+  .option("--apply", "Overwrite config in place (backs up original to .bak)")
+  .option("--scope <scope>", "Config scope: user or project", "user")
+  .description("Wrap Claude Code MCP servers with Flight proxy")
+  .action(async (options: { apply?: boolean; scope?: string }) => {
+    banner("init");
+    const scope = (options.scope === "project" ? "project" : "user") as "user" | "project";
+    const result = await initClaudeCode({ apply: options.apply, scope });
+    const configPath = getClaudeCodeConfigPath(scope);
+
+    if (result.configFound) {
+      console.log(`\x1b[32m✓\x1b[0m Found existing config: ${configPath}`);
+      console.log(`\x1b[32m✓\x1b[0m Discovered ${result.serverCount} MCP server(s): ${result.serverNames.join(", ")}`);
+    } else {
+      console.log(`\x1b[33m!\x1b[0m No existing config found. Generated example snippet.`);
+    }
+
+    if (result.applied) {
+      console.log(`\x1b[32m✓\x1b[0m Config applied to: ${result.outputPath}`);
+      console.log(`  Backup saved to: ${result.outputPath}.bak`);
+    } else {
+      console.log(`\x1b[32m✓\x1b[0m Wrapped config written to: ${result.outputPath}`);
+      if (result.commands && result.commands.length > 0) {
+        console.log(`\n  Or run these commands to add servers individually:\n`);
+        for (const cmd of result.commands) {
+          console.log(`  \x1b[36m${cmd}\x1b[0m`);
+        }
+      }
+    }
+  });
+
+claude
   .command("setup")
-  .description("Interactive setup wizard — configure Flight features for Claude Code")
+  .description("Interactive setup wizard — configure Flight hooks, proxy, and slash commands")
   .option("--remove", "Remove Flight hooks and restore original config")
   .option("--hooks", "Enable hooks (skip prompt)")
   .option("--no-hooks", "Disable hooks (skip prompt)")
@@ -451,21 +490,58 @@ program
       return;
     }
 
-    // Build overrides from CLI flags
     const overrides: Partial<SetupFeatures> = {};
     if (options.hooks !== undefined) overrides.hooks = options.hooks;
     if (options.proxy !== undefined) overrides.proxy = options.proxy;
     if (options.pd !== undefined) overrides.pd = options.pd;
     if (options.slashCommands !== undefined) overrides.slashCommands = options.slashCommands;
 
-    // Banner preference comes from the global --no-banner flag
     const root = program.opts<{ banner: boolean }>();
     if (root.banner === false) overrides.banner = false;
 
     await runSetupWizard(overrides);
   });
 
-// --- Hook commands (internal, called by Claude Code) ---
+const claudeHooks = claude.command("hooks").description("Manage Claude Code hooks");
+
+claudeHooks
+  .command("install")
+  .description("Install Flight hooks into Claude Code settings")
+  .action(async () => {
+    banner("hooks");
+    const { installHooks } = await import("./hooks.js");
+    const { join } = await import("node:path");
+    const { homedir } = await import("node:os");
+    const settingsPath = join(homedir(), ".claude", "settings.json");
+    const result = await installHooks(settingsPath);
+    if (result.installed) {
+      console.log(`\x1b[32m✓\x1b[0m Hooks installed in ${settingsPath}`);
+      if (result.backedUp) console.log(`  Backup saved to ${settingsPath}.bak`);
+    } else {
+      console.log(`\x1b[33m!\x1b[0m Hooks already installed`);
+    }
+  });
+
+claudeHooks
+  .command("remove")
+  .description("Remove Flight hooks from Claude Code settings")
+  .action(async () => {
+    banner("hooks");
+    const { removeHooks } = await import("./hooks.js");
+    const { join } = await import("node:path");
+    const { homedir } = await import("node:os");
+    const settingsPath = join(homedir(), ".claude", "settings.json");
+    const result = await removeHooks(settingsPath);
+    if (result.removed) {
+      console.log(`\x1b[32m✓\x1b[0m Hooks removed from ${settingsPath}`);
+    } else {
+      console.log(`\x1b[33m!\x1b[0m No Flight hooks found to remove`);
+    }
+  });
+
+// ============================================================
+// Hook handlers (internal, called by Claude Code hooks system)
+// ============================================================
 
 const hook = new Command("hook").description("Internal hook handlers (called by Claude Code)");
 program.addCommand(hook);
@@ -504,6 +580,78 @@ hook
     }
     const output = handlePostToolUseSync(stdin);
     process.stderr.write(output + "\n");
+  });
+
+// ============================================================
+// Deprecated aliases — old command paths with deprecation notice
+// ============================================================
+
+// flight setup → flight claude setup
+program
+  .command("setup", { hidden: true })
+  .allowUnknownOption()
+  .action(async (_options, cmd) => {
+    deprecated("flight setup", "flight claude setup")();
+    const args = cmd.args;
+    const setupCmd = claude.commands.find((c) => c.name() === "setup")!;
+    await setupCmd.parseAsync(["node", "flight", ...args]);
+  });
+
+// flight init <target> → flight claude init <desktop|code>
+program
+  .command("init", { hidden: true })
+  .argument("[target]")
+  .allowUnknownOption()
+  .action(async (target: string, _options, cmd) => {
+    const newTarget = target === "claude-code" ? "code" : "desktop";
+    deprecated(`flight init ${target}`, `flight claude init ${newTarget}`)();
+    const initCmd = claudeInit.commands.find((c) => c.name() === newTarget);
+    if (initCmd) {
+      await initCmd.parseAsync(["node", "flight", ...cmd.args.slice(1)]);
+    }
+  });
+
+// flight hooks <install|remove> → flight claude hooks <install|remove>
+program
+  .command("hooks", { hidden: true })
+  .argument("[action]")
+  .allowUnknownOption()
+  .action(async (action: string) => {
+    deprecated(`flight hooks ${action}`, `flight claude hooks ${action}`)();
+    const hooksCmd = claudeHooks.commands.find((c) => c.name() === action);
+    if (hooksCmd) {
+      await hooksCmd.parseAsync(["node", "flight"]);
+    }
+  });
+
+// flight export → flight log export
+program
+  .command("export", { hidden: true })
+  .allowUnknownOption()
+  .action(async (_options, cmd) => {
+    deprecated("flight export", "flight log export")();
+    const exportCmd = log.commands.find((c) => c.name() === "export")!;
+    await exportCmd.parseAsync(["node", "flight", ...cmd.args]);
+  });
+
+// flight stats → flight log stats
+program
+  .command("stats", { hidden: true })
+  .allowUnknownOption()
+  .action(async (_options, cmd) => {
+    deprecated("flight stats", "flight log stats")();
+    const statsCmd = log.commands.find((c) => c.name() === "stats")!;
+    await statsCmd.parseAsync(["node", "flight", ...cmd.args]);
+  });
+
+// flight replay → flight log replay
+program
+  .command("replay", { hidden: true })
+  .allowUnknownOption()
+  .action(async (_options, cmd) => {
+    deprecated("flight replay", "flight log replay")();
+    const replayCmd = log.commands.find((c) => c.name() === "replay")!;
+    await replayCmd.parseAsync(["node", "flight", ...cmd.args]);
   });
 
 program.parse();
