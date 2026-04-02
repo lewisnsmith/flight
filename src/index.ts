@@ -1,5 +1,5 @@
 export { startProxy, type ProxyOptions } from "./proxy.js";
-export { type LogEntry, type AlertEntry } from "./logger.js";
+export { createSessionLogger, type LogEntry, type AlertEntry, type EventType, type ModelConfig, type SessionLogger, type SessionLoggerOptions, type RedactionOptions } from "./logger.js";
 export { initClaude, initClaudeCode, getClaudeConfigPath, getClaudeCodeConfigPath, wrapWithFlight } from "./init.js";
 export { runSetup, runRemove, runSetupWizard, promptFeatures, type SetupResult, type SetupOptions, type SetupFeatures } from "./setup.js";
 export { installHooks, removeHooks } from "./hooks.js";
@@ -13,3 +13,5 @@ export { createRetryManager, getToolNameFromRequest, type RetryManager, type Ret
 export { findCallRequest, replayCall, type ReplayOptions, type ReplayResult } from "./replay.js";
 export { printBanner, printSetupBanner, printCompletionBanner } from "./art.js";
 export { DEFAULT_LOG_DIR, C, type McpServerEntry } from "./shared.js";
+export { createFlightClient, type FlightClient, type FlightClientOptions } from "./sdk.js";
+export { startCollector, type CollectorOptions } from "./collector.js";
